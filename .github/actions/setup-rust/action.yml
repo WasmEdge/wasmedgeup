@@ -1,4 +1,5 @@
 name: Setup rust toolchain
+description: Setup rust toolchain with the toolchain version input and sccache
 
 inputs:
   toolchain:
@@ -18,6 +19,7 @@ runs:
   - uses: mozilla-actions/sccache-action@v0.0.7
 
   - name: Setup rust cache variables
+    shell: bash
     run: |
       echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
       echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
