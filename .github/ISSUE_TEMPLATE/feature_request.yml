@@ -1,0 +1,31 @@
+name: Feature request
+description: Request a feature or enhancement
+labels: [ enhancement ]
+body:
+  - type: textarea
+    attributes:
+      label: Description
+      placeholder: A clear and concise description of what you're requesting.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Proposed Solution
+      placeholder: A clear and concise description of how this feature should work.
+    validations:
+      required: false
+
+  - type: textarea
+    attributes:
+      label: Alternative Solution(s)
+      placeholder: Have you considered other ways to achieve the same goal? Describe them here.
+    validations:
+      required: false
+
+  - type: textarea
+    attributes:
+      label: Additional Information
+      placeholder: Related issues, screenshots, references, or anything else that helps understand the request.
+    validations:
+      required: false
