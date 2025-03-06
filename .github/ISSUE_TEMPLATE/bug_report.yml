@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a bug or unexpected behavior
+labels: [ bug ]
+body:
+  - type: textarea
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug.
+      placeholder: Describe the bug you've encountered.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the issue.
+      placeholder: |
+        1. Go to '...'
+        2. Click on '...'
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Expected Behavior
+      description: Describe what should have happened.
+      placeholder: Explain the correct behavior you expected.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Additional Information
+      description: Any other context or related issues?
+      placeholder: |
+        Provide any other relevant information such as:
+        - Logs or error messages
+        - Your OS and architecture (e.g., Ubuntu 22.04, x86_64)
+        - Your Rust version (if built from source)
+        - The wasmedgeup version you're using
+    validations:
+      required: false
+
