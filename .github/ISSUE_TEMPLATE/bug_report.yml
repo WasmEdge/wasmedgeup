@@ -41,4 +41,3 @@ body:
         - The wasmedgeup version you're using
     validations:
       required: false
-

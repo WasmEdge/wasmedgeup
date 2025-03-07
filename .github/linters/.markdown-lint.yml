@@ -1,0 +1,8 @@
+---
+MD007:                 # Unordered list indentation
+  indent: 2            # Consider disable MD005 if things fail on ordered list
+MD013:                 # Line length 80 is far to short
+  line_length: 999     # We allow soft wrapped paragraphs and raw code outputs
+MD029: false           # Ordered list item prefix
+MD033: false           # Allow inline HTML
+MD041: false           # Allow first line in file is not a top level header

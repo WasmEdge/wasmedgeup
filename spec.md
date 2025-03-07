@@ -29,21 +29,21 @@ wasmedgeup should have the following commands:
 ###### Options
 
 - `-p`, `--path`
-  -  Description: Set the installed location
-  -  Usage: `--path /usr/local`
-  -  Default: `$HOME/.wasmedge`
+  - Description: Set the installed location
+  - Usage: `--path /usr/local`
+  - Default: `$HOME/.wasmedge`
 - `-t`, `--tmpdir`
-  -  Description: Set the temporary directory for staging downloaded assets
-  -  Usage: `--tmpdir /tmp`
-  -  Default: `/tmp`
+  - Description: Set the temporary directory for staging downloaded assets
+  - Usage: `--tmpdir /tmp`
+  - Default: `/tmp`
 - `-o`, `--os`
-  -  Description: Overwrite the OS detection. If omitted, `wasmedgeup` auto-detects.
-  -  Usage: `--os Darwin`
-  -  Possible values: `Linux`, `Darwin` (macOS), `Windows`, or distro-specific like `Ubuntu`.
+  - Description: Overwrite the OS detection. If omitted, `wasmedgeup` auto-detects.
+  - Usage: `--os Darwin`
+  - Possible values: `Linux`, `Darwin` (macOS), `Windows`, or distro-specific like `Ubuntu`.
 - `-a`, `--arch`
-  -  Description: Overwrite the ARCH detection. If omitted, `wasmedgeup` auto-detects.
-  -  Usage: `--arch aarch64`
-  -  Possible values: `x86_64`, `arm64`, `aarch64` (where `arm64` is synonymous with `aarch64`).
+  - Description: Overwrite the ARCH detection. If omitted, `wasmedgeup` auto-detects.
+  - Usage: `--arch aarch64`
+  - Possible values: `x86_64`, `arm64`, `aarch64` (where `arm64` is synonymous with `aarch64`).
 
 #### Global Options
 
@@ -56,11 +56,7 @@ wasmedgeup should have the following commands:
 When no OS or ARCH flags are provided, `wasmedgeup` should detect the operating systems and the architectures automatically.
 
 1. ARCH: "x86_64", "arm64", "aarch64". Please note that "arm64" equals "aarch64".
-2. OS: Typically one of:
-  - "Ubuntu"
-  - "Linux": generic for most distributions besides "Ubuntu"
-  - "Darwin": macOS
-  - "Windows"
+2. OS: Typically one of "Ubuntu", "Linux" (generic for most distributions besides Ubuntu), "Darwin" (macOS), "Windows"
 
 If ARCH and OS are not matched to the above list, `wasmedgeup` should raise an error and refuse to proceed.
 
@@ -129,6 +125,7 @@ Just remove the installed plugins.
 Show all avaliable plugins. We will provide several manifests for it.
 Assuming there are two repositories called `wasmedge/cpp_plugins` and `wasmedge/rust_plugins`.
 Both of them provide a branch or tag called `latest`. So the installer can always retrieve the list via the following two links:
+
 1. `https://github.com/WasmEdge/cpp_plugins/releases/download/latest/version.json`
 2. `https://github.com/WasmEdge/rust_plugins/releases/download/latest/version.json`
 
@@ -142,6 +139,7 @@ The content of these version.json provide:
 ```
 
 Assuming we will have the following branches/tags called `<wasmedge_runtime_versions>`. So the installer can always retrieve the plugin information via the following links:
+
 1. `https://github.com/WasmEdge/cpp_plugins/releases/download/0.15.0/version.json`
 2. `https://github.com/WasmEdge/rust_plugins/releases/download/0.14.1/version.json`
 
@@ -192,14 +190,16 @@ The content of these version.json provide:
 ```
 
 Assuming the plugin assets has their own release tag like the following format:
+
 1. `https://github.com/WasmEdge/cpp_plugins/releases/download/<plugin_name>-<wasmedge_runtime_version>-<plugin_version>`
 2. `https://github.com/WasmEdge/rust_plugins/releases/download/<plugin_name>-<wasmedge_runtime_version>-<plugin_version>`
 
 So the installer can access these assets via composing the link:
+
 1. `https://github.com/WasmEdge/cpp_plugins/releases/download/wasi-nn-ggml-0.15.0-0.1.18`
 2. `https://github.com/WasmEdge/rust_plugins/releases/download/wasi-xxx-0.14.1-0.6.4`
 
-#### Examples
+#### Examples for plugins
 
 ```bash
 # List plugins, assuming installed wasmedge 0.15.0, os is Darwin, and arch is aarch64
