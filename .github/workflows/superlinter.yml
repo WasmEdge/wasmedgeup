@@ -31,5 +31,7 @@ jobs:
           # Only check new or modified files
           VALIDATE_ALL_CODEBASE: false
           # Enable specific linters
+          ENFORCE_COMMITLINT_CONFIGURATION_CHECK: true
+          VALIDATE_GIT_COMMITLINT: true
           VALIDATE_MARKDOWN: true
           VALIDATE_YAML: true
