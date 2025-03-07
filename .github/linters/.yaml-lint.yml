@@ -1,0 +1,9 @@
+---
+extends: relaxed
+
+rules:
+  line-length:
+    max: 128
+  indentation:
+    spaces: 2
+    indent-sequences: true
