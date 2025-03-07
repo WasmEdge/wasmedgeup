@@ -10,18 +10,17 @@ inputs:
 runs:
   using: composite
   steps:
-  - name: Setup rust toolchain
-    shell: bash
-    run: |
-      rustup toolchain install ${{ inputs.toolchain }} --profile default
-      rustup default ${{ inputs.toolchain }}
+    - name: Setup rust toolchain
+      shell: bash
+      run: |
+        rustup toolchain install ${{ inputs.toolchain }} --profile default
+        rustup default ${{ inputs.toolchain }}
 
-  - uses: mozilla-actions/sccache-action@v0.0.7
+    - uses: mozilla-actions/sccache-action@v0.0.7
 
-  - name: Setup rust cache variables
-    shell: bash
-    run: |
-      echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
-      echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-      echo "CARGO_INCREMENTAL=false" >> $GITHUB_ENV
-
+    - name: Setup rust cache variables
+      shell: bash
+      run: |
+        echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+        echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+        echo "CARGO_INCREMENTAL=false" >> $GITHUB_ENV

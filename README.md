@@ -14,7 +14,7 @@ Note: This project is still in development and not yet ready for use.
 
 ## Installation
 
-*Coming soon*
+Coming soon.
 
 ## Usage
 
