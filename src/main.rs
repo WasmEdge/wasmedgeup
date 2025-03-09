@@ -1,3 +1,7 @@
+use clap::Parser;
+use wasmedgeup::cli::Cli;
+
 fn main() {
-    println!("Greeting from wasmedgeup");
+    let cli = Cli::parse();
+    println!("{:?}", cli);
 }
