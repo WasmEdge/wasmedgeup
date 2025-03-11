@@ -47,8 +47,8 @@ wasmedgeup should have the following commands:
 
 #### Global Options
 
-1. `-v`, `--version`: Prints wasmedgeup installer version (not the runtime)
-2. `-V`, `--verbose`: Enables verbose output
+1. `-V`, `--version`: Prints wasmedgeup installer version (not the runtime)
+2. `-v`, `--verbose`: Enables verbose output (can be supplied multiple times to increase verbosity level, e.g. `-vv`)
 3. `-q`, `--quite`: Disables progress output
 
 #### Internal Behavior / OS & ARCH Detection
@@ -106,7 +106,7 @@ Just as with the runtime installation, `wasmedgeup` should manage plugins in a u
 2. `install package_1 package_2 ...`: Install multiple given plugins, split by space
 3. `install package@version`: Install the given plugin with specific version
 
-- Steps:  
+- Steps:
   1. Checks the currently installed WasmEdge runtime version (e.g., `0.15.0`).
   2. Retrieves the plugin manifest JSON from links, described below.
   3. Resolves the best matching plugin binaries for the user’s OS, ARCH, and runtime version.
