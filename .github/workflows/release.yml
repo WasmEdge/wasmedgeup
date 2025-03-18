@@ -49,7 +49,7 @@ jobs:
       - name: Set archive name (non-windows)
         id: archive
         run: >
-          echo "archive_name=${{ env.package_name }}-${{ matrix.target }}" >> $GITHUB_ENV
+          echo "archive_name=${{ env.package_name }}-${{ matrix.target }}" >> "$GITHUB_ENV"
 
       - name: Set archive name (windows)
         if: "${{ matrix.os == 'windows-latest' }}"
