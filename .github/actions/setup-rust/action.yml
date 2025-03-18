@@ -6,6 +6,9 @@ inputs:
     description: Toolchain name, such as 'stable', 'nightly', or '1.8.0'
     required: true
     default: stable
+  target:
+    description: Build target name, such as 'x86_64-unknown-linux-gnu', 'aarch64-apple-darwin', or 'x86_64-pc-windows-msvc'
+    required: false
 
 runs:
   using: composite
@@ -15,6 +18,11 @@ runs:
       run: |
         rustup toolchain install ${{ inputs.toolchain }} --profile default
         rustup default ${{ inputs.toolchain }}
+
+    - name: Add build target
+      if: "${{ inputs.target != '' }}"
+      shell: bash
+      run: rustup target add ${{ inputs.target }}
 
     - uses: mozilla-actions/sccache-action@v0.0.7
 
