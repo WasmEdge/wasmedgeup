@@ -14,8 +14,6 @@ jobs:
     permissions:
       contents: read
       packages: read
-      # To report GitHub Actions status checks
-      statuses: write
 
     steps:
       - name: Checkout Code
@@ -34,12 +32,10 @@ jobs:
       - name: Run Super Linter
         uses: super-linter/super-linter@v7.3.0
         env:
-          # To report GitHub Actions status checks
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # ASCII Possum is cute, but not necessary
           SUPPRESS_POSSUM: true
-          # Only check new or modified files (XXX: check all files for testing, will remove before merge)
-          VALIDATE_ALL_CODEBASE: true
+          # Only check new or modified files
+          VALIDATE_ALL_CODEBASE: false
           # Language-specific linters
           VALIDATE_MARKDOWN: true
           VALIDATE_YAML: true
@@ -48,3 +44,5 @@ jobs:
           VALIDATE_GIT_COMMITLINT: true
           VALIDATE_GITHUB_ACTIONS: true
           VALIDATE_GITLEAKS: true
+          # Do not rely on the statuses permission
+          MULTI_STATUS: false
