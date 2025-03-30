@@ -47,7 +47,7 @@ wasmedgeup should have the following commands:
 
 ##### Command `List`
 
-###### Options
+Lists available WasmEdge releases. By default, only stable releases are shown.
 
 - `-a`, `--all`
   - Description: Include pre-release versions (alpha, beta, rc).
