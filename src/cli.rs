@@ -47,7 +47,8 @@ pub trait CommandExecutor {
 pub enum Commands {
     /// Install a specified WasmEdge runtime version
     Install(InstallArgs),
-    /// List available WasmEdge releases
+    /// Lists available WasmEdge releases.
+    /// By default, only stable releases are shown.
     List(ListArgs),
     /// Uninstall a specific version of WasmEdge from the system
     Remove(RemoveArgs),

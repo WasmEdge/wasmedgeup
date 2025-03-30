@@ -5,7 +5,11 @@ use tokio::join;
 use crate::cli::CommandExecutor;
 
 #[derive(Debug, Parser)]
-pub struct ListArgs;
+pub struct ListArgs {
+    /// Include pre-release versions (alpha, beta, rc).
+    #[arg(short, long, default_value_t = false)]
+    all: bool,
+}
 
 impl CommandExecutor for ListArgs {
     async fn execute(self, ctx: CommandContext) -> Result<()> {
