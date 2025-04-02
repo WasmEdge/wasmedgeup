@@ -1,4 +1,4 @@
-use crate::{cli::CommandContext, prelude::*};
+use crate::{api::ReleasesFilter, cli::CommandContext, prelude::*};
 use clap::Parser;
 use tokio::join;
 
@@ -13,8 +13,14 @@ pub struct ListArgs {
 
 impl CommandExecutor for ListArgs {
     async fn execute(self, ctx: CommandContext) -> Result<()> {
-        let (gh_releases, latest_release) =
-            join!(ctx.client.releases(), ctx.client.latest_release());
+        let (gh_releases, latest_release) = join!(
+            ctx.client.releases(if self.all {
+                ReleasesFilter::All
+            } else {
+                ReleasesFilter::Stable
+            }),
+            ctx.client.latest_release()
+        );
 
         let gh_releases = gh_releases?;
         let latest_release = latest_release?;

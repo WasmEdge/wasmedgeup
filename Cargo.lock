@@ -812,6 +812,7 @@ dependencies = [
  "chrono",
  "either",
  "futures",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
@@ -1525,6 +1526,7 @@ name = "wasmedgeup"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures",
  "octocrab",
  "semver",
  "snafu",
