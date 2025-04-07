@@ -9,7 +9,7 @@ repository = "https://github.com/WasmEdge/wasmedgeup"
 license = "Apache-2.0"
 
 [dependencies]
-clap = { version = "4.5.31", features = ["derive"] }
+clap = { version = "4.5.34", features = ["derive"] }
 futures = "0.3.31"
 octocrab = { version = "0.44.0", features = ["stream"] }
 semver = "1.0.26"
