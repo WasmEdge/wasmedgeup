@@ -1,65 +1,34 @@
-use std::sync::Arc;
-
 use crate::prelude::*;
-use futures::{future, StreamExt, TryStreamExt};
-use octocrab::{models::repos::Release, Octocrab};
-use snafu::ResultExt;
+use futures::{StreamExt, TryStreamExt};
+use releases::Releases;
+use semver::Version;
 
-const WASM_EDGE_OWNER: &str = "WasmEdge";
-const WASM_EDGE_REPO: &str = "WasmEdge";
-const NUM_RELEASES: usize = 10;
+mod releases;
 
-#[derive(Debug, Clone)]
+pub use releases::ReleasesFilter;
+
+#[derive(Debug, Clone, Default)]
 pub struct WasmEdgeApiClient {
-    client: Arc<Octocrab>,
-}
-
-impl Default for WasmEdgeApiClient {
-    fn default() -> Self {
-        Self {
-            client: octocrab::instance(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum ReleasesFilter {
-    All,
-    Stable,
+    client: reqwest::Client,
 }
 
 impl WasmEdgeApiClient {
-    pub async fn releases(&self, filter: ReleasesFilter) -> Result<Vec<Release>> {
-        self.client
-            .repos(WASM_EDGE_OWNER, WASM_EDGE_REPO)
-            .releases()
-            .list()
-            .send()
-            .await
-            .context(GitHubSnafu {
-                resource: "releases",
-            })?
-            .into_stream(&self.client)
-            .filter(|release| match (&filter, release) {
-                (ReleasesFilter::Stable, Ok(r)) => future::ready(!r.prerelease),
-                _ => future::ready(true),
-            })
-            .take(NUM_RELEASES)
+    pub async fn releases(
+        &self,
+        filter: ReleasesFilter,
+        num_releases: usize,
+    ) -> Result<Vec<Version>> {
+        Releases::new(self.client.clone(), filter)
+            .take(num_releases)
             .try_collect()
             .await
-            .context(GitHubSnafu {
-                resource: "releases",
-            })
     }
 
-    pub async fn latest_release(&self) -> Result<Release> {
-        self.client
-            .repos(WASM_EDGE_OWNER, WASM_EDGE_REPO)
-            .releases()
-            .get_latest()
+    pub async fn latest_release(&self) -> Result<Version> {
+        Releases::new(self.client.clone(), ReleasesFilter::Stable)
+            .try_next()
             .await
-            .context(GitHubSnafu {
-                resource: "releases",
-            })
+            .transpose()
+            .unwrap_or(Err(Error::Unknown))
     }
 }

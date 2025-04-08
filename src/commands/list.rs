@@ -13,21 +13,21 @@ pub struct ListArgs {
 
 impl CommandExecutor for ListArgs {
     async fn execute(self, ctx: CommandContext) -> Result<()> {
-        let (gh_releases, latest_release) = join!(
-            ctx.client.releases(if self.all {
-                ReleasesFilter::All
-            } else {
-                ReleasesFilter::Stable
-            }),
-            ctx.client.latest_release()
-        );
+        let filter = if self.all {
+            ReleasesFilter::All
+        } else {
+            ReleasesFilter::Stable
+        };
+
+        let (gh_releases, latest_release) =
+            join!(ctx.client.releases(filter, 10), ctx.client.latest_release());
 
         let gh_releases = gh_releases?;
         let latest_release = latest_release?;
 
         for gh_release in gh_releases.into_iter() {
-            print!("{}", gh_release.tag_name);
-            if gh_release.tag_name == latest_release.tag_name {
+            print!("{}", gh_release);
+            if gh_release == latest_release {
                 println!(" <- latest");
             } else {
                 println!();

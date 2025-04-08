@@ -35,6 +35,7 @@ pub struct Cli {
     pub commands: Option<Commands>,
 }
 
+#[derive(Debug, Clone, Default)]
 pub struct CommandContext {
     pub client: WasmEdgeApiClient,
 }
