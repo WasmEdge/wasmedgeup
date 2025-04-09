@@ -15,7 +15,7 @@
 wasmedgeup should have the following commands:
 
 1. `install`: Installs a specified (or latest) WasmEdge runtime version.
-2. `list`: Lists all available WasmEdge releases.
+2. `list`: Lists available WasmEdge releases.
 3. `remove`: Uninstalls a specific version of WasmEdge from the system, removing installed files.
 4. `help`: Shows a usage overview or help message for each subcommand.
 
@@ -44,6 +44,13 @@ wasmedgeup should have the following commands:
   - Description: Overwrite the ARCH detection. If omitted, `wasmedgeup` auto-detects.
   - Usage: `--arch aarch64`
   - Possible values: `x86_64`, `arm64`, `aarch64` (where `arm64` is synonymous with `aarch64`).
+
+##### Command `List`
+
+Lists available WasmEdge releases. By default, only stable releases are shown.
+
+- `-a`, `--all`
+  - Description: Include pre-release versions (alpha, beta, rc).
 
 #### Global Options
 

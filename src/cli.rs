@@ -1,6 +1,11 @@
+use std::future::Future;
+
+use crate::api::WasmEdgeApiClient;
 use crate::commands::install::InstallArgs;
+use crate::commands::list::ListArgs;
 use crate::commands::plugin::PluginCli;
 use crate::commands::remove::RemoveArgs;
+use crate::prelude::*;
 use clap::builder::styling::AnsiColor;
 use clap::{builder::Styles, Parser, Subcommand};
 
@@ -30,14 +35,35 @@ pub struct Cli {
     pub commands: Option<Commands>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CommandContext {
+    pub client: WasmEdgeApiClient,
+}
+
+pub trait CommandExecutor {
+    fn execute(self, ctx: CommandContext) -> impl Future<Output = Result<()>> + Send;
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Install a specified WasmEdge runtime version
     Install(InstallArgs),
-    /// List available WasmEdge releases
-    List,
+    /// Lists available WasmEdge releases.
+    /// By default, only stable releases are shown.
+    List(ListArgs),
     /// Uninstall a specific version of WasmEdge from the system
     Remove(RemoveArgs),
     /// Manage WasmEdge plugins
     Plugin(PluginCli),
+}
+
+impl CommandExecutor for Commands {
+    async fn execute(self, ctx: CommandContext) -> Result<()> {
+        use Commands::*;
+
+        match self {
+            List(args) => args.execute(ctx).await,
+            _ => todo!(),
+        }
+    }
 }
