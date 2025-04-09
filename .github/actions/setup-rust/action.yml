@@ -24,7 +24,7 @@ runs:
       shell: bash
       run: rustup target add ${{ inputs.target }}
 
-    - uses: mozilla-actions/sccache-action@v0.0.8
+    - uses: mozilla-actions/sccache-action@v0.0.9
 
     - name: Setup rust cache variables
       shell: bash
