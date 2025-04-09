@@ -15,6 +15,13 @@ const RELEASES_URL: &str = "https://github.com/WasmEdge/WasmEdge/releases";
 
 static RELEASE_TAG_REGEX: OnceLock<Regex> = OnceLock::new();
 
+fn release_tag_regex() -> &'static Regex {
+    RELEASE_TAG_REGEX.get_or_init(|| {
+        Regex::new(r"releases\/tag\/(?<version>[0-9]+\.[0-9]+\.[0-9]+(\-[[:alpha:]]+\.[0-9]+)?)")
+            .expect("release tag regex should be valid")
+    })
+}
+
 pin_project! {
     pub struct Releases<'a> {
         client: reqwest::Client,
@@ -63,13 +70,6 @@ impl<'a> Stream for Releases<'a> {
     type Item = Result<semver::Version>;
 
     fn poll_next(self: Pin<&mut Releases<'a>>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let regex = RELEASE_TAG_REGEX.get_or_init(|| {
-            Regex::new(
-                r"releases\/tag\/(?<version>[0-9]+\.[0-9]+\.[0-9]+(\-[[:alpha:]]+\.[0-9]+)?)",
-            )
-            .expect("release tag regex should be valid")
-        });
-
         let this = self.get_mut();
 
         loop {
@@ -92,7 +92,8 @@ impl<'a> Stream for Releases<'a> {
                     }
                 },
                 State::Fetched(ref html) => {
-                    let Some(caps) = regex.captures_at(html, this.current_start) else {
+                    let Some(caps) = release_tag_regex().captures_at(html, this.current_start)
+                    else {
                         this.current_start = 0;
                         this.current_page += 1;
                         this.state = State::Ready;
@@ -136,5 +137,46 @@ impl ReleasesFilter {
             Self::All => true,
             Self::Stable => semver.pre.is_empty(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::Range;
+
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case::stable(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0""#, "1.0.0", 38..43)]
+    #[case::prerelease(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0-alpha.1""#, "1.0.0-alpha.1", 38..51)]
+    fn test_valid_semver_valid_release_tags(
+        #[case] input: &str,
+        #[case] expected_str: &str,
+        #[case] expected_range: Range<usize>,
+    ) {
+        let result = release_tag_regex().captures(input).unwrap();
+        let version = result.name("version").unwrap();
+        assert_eq!(version.as_str(), expected_str);
+        assert_eq!(version.range(), expected_range);
+    }
+
+    #[rstest]
+    #[case::prerelease_no_num(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0-alpha""#, "1.0.0", 38..43)]
+    #[case::prerelease_no_alpha(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0-0.3.7""#, "1.0.0", 38..43)]
+    #[case::prerelease_multiple(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0-x.7.z.92""#, "1.0.0-x.7", 38..47)]
+    #[case::prerelease_hyphens(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0-x-y-z.--""#, "1.0.0", 38..43)]
+    #[case::build_meta(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0+20130313144700""#, "1.0.0", 38..43)]
+    #[case::prerelease_build_meta(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0-alpha+001""#, "1.0.0", 38..43)]
+    fn test_valid_semver_partial_release_tags(
+        #[case] input: &str,
+        #[case] expected_str: &str,
+        #[case] expected_range: Range<usize>,
+    ) {
+        let result = release_tag_regex().captures(input).unwrap();
+        let version = result.name("version").unwrap();
+        assert_eq!(version.as_str(), expected_str);
+        assert_eq!(version.range(), expected_range);
     }
 }
