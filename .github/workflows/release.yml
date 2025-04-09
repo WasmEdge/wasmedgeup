@@ -110,7 +110,7 @@ jobs:
       - name: Upload artifacts to release
         run: |
           cd artifacts
-          gh release upload ${{ needs.get-tag.outputs.tag_name }} *
+          gh release upload ${{ needs.get-tag.outputs.tag_name }} ./*
           gh release edit ${{ needs.get-tag.outputs.tag_name }} --draft=false --latest
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
