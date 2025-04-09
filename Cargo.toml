@@ -1,6 +1,6 @@
 [package]
 name = "wasmedgeup"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["hydai <hydai@secondstate.io>"]
 description = "An installer for the Wasmedge runtime and plugins."
