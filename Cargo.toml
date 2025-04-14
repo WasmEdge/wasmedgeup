@@ -9,7 +9,7 @@ repository = "https://github.com/WasmEdge/wasmedgeup"
 license = "Apache-2.0"
 
 [dependencies]
-clap = { version = "4.5.35", features = ["derive"] }
+clap = { version = "4.5.36", features = ["derive"] }
 futures = "0.3.31"
 pin-project-lite = "0.2.16"
 regex = "1.11.1"
