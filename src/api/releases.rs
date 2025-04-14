@@ -150,7 +150,10 @@ mod tests {
 
     #[rstest]
     #[case::stable(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0""#, "1.0.0", 38..43)]
-    #[case::prerelease(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0-alpha.1""#, "1.0.0-alpha.1", 38..51)]
+    #[case::alpha(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0-alpha.1""#, "1.0.0-alpha.1", 38..51)]
+    #[case::beta(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0-beta.1""#, "1.0.0-beta.1", 38..50)]
+    #[case::rc(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0-rc.1""#, "1.0.0-rc.1", 38..48)]
+    #[case::any_prerelease(r#"href="/WasmEdge/WasmEdge/releases/tag/1.0.0-anyprerelease.1""#, "1.0.0-anyprerelease.1", 38..59)]
     fn test_valid_semver_valid_release_tags(
         #[case] input: &str,
         #[case] expected_str: &str,
