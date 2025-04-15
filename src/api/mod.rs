@@ -1,5 +1,5 @@
 use crate::prelude::*;
-mod releases;
+pub mod releases;
 pub use releases::ReleasesFilter;
 
 use semver::Version;
