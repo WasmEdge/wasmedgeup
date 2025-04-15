@@ -1,34 +1,22 @@
 use crate::prelude::*;
-use futures::{StreamExt, TryStreamExt};
-use releases::Releases;
-use semver::Version;
-
 mod releases;
-
 pub use releases::ReleasesFilter;
 
+use semver::Version;
+
 #[derive(Debug, Clone, Default)]
-pub struct WasmEdgeApiClient {
-    client: reqwest::Client,
-}
+pub struct WasmEdgeApiClient {}
+
+const WASM_EDGE_GIT_URL: &str = "https://github.com/WasmEdge/WasmEdge.git";
 
 impl WasmEdgeApiClient {
-    pub async fn releases(
-        &self,
-        filter: ReleasesFilter,
-        num_releases: usize,
-    ) -> Result<Vec<Version>> {
-        Releases::new(self.client.clone(), filter)
-            .take(num_releases)
-            .try_collect()
-            .await
+    pub fn releases(&self, filter: ReleasesFilter, num_releases: usize) -> Result<Vec<Version>> {
+        let releases = releases::get_all(WASM_EDGE_GIT_URL, filter)?;
+        Ok(releases.into_iter().take(num_releases).collect())
     }
 
-    pub async fn latest_release(&self) -> Result<Version> {
-        Releases::new(self.client.clone(), ReleasesFilter::Stable)
-            .try_next()
-            .await
-            .transpose()
-            .unwrap_or(Err(Error::Unknown))
+    pub fn latest_release(&self) -> Result<Version> {
+        let releases = releases::get_all(WASM_EDGE_GIT_URL, ReleasesFilter::Stable)?;
+        releases.into_iter().next().ok_or(Error::Unknown)
     }
 }

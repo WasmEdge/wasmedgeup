@@ -3,9 +3,9 @@ use snafu::Snafu;
 #[derive(Debug, Default, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Unable to fetch resource '{}' from GitHub", resource))]
-    GitHub {
-        source: reqwest::Error,
+    #[snafu(display("Unable to fetch resource '{}' for git", resource))]
+    Git {
+        source: git2::Error,
         resource: &'static str,
     },
 
