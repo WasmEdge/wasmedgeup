@@ -174,8 +174,8 @@ impl InstallArgs {
     fn extract_to(file: std::fs::File, to: &Path) -> Result<()> {
         use zip::ZipArchive;
 
-        let mut archive = Archive::new(file).context(ExtractSnafu {})?;
-        archive.extract(path).context(ExtractSnafu {})?;
+        let mut archive = ZipArchive::new(file).context(ExtractSnafu {})?;
+        archive.extract(to).context(ExtractSnafu {})?;
 
         Ok(())
     }

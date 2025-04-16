@@ -27,7 +27,7 @@ pub enum Error {
         source: std::io::Error,
 
         #[cfg(windows)]
-        source: zip::ZipError,
+        source: zip::result::ZipError,
     },
 
     #[snafu(transparent)]
