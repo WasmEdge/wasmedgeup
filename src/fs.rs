@@ -1,3 +1,6 @@
+use crate::prelude::*;
+use snafu::ResultExt;
+
 use std::path::{Path, PathBuf};
 
 use tokio::fs;
@@ -48,4 +51,64 @@ pub async fn copy_tree(from_dir: &Path, to_dir: &Path) {
             );
         };
     }
+}
+
+/// Extracts the contents of a compressed archive (`.tar.gz` for Unix-like systems, `.zip` for Windows) to a specified directory.
+///
+/// # Arguments
+///
+/// * `file` - A file object representing the compressed archive. This file must be opened in read mode.
+/// * `dest` - The destination directory to which the contents will be extracted.
+///
+/// # Errors
+///
+/// Returns an error if the extraction fails. This could happen if the archive format is unsupported or
+/// if the destination path cannot be created.
+///
+/// # Example
+/// ```rust
+/// let file = std::fs::File::open("archive.tar.gz")?;
+/// let dest = Path::new("/path/to/destination");
+/// extract_archive(file, dest).await?;
+/// ```
+pub async fn extract_archive(mut file: std::fs::File, dest: &Path) -> Result<()> {
+    use std::io::Seek;
+    use tokio::fs;
+
+    fs::create_dir_all(dest).await.inspect_err(
+        |e| tracing::error!(error = %e.to_string(), "Failed to create directory during extraction"),
+    )?;
+    file.rewind()?;
+
+    #[cfg(unix)]
+    {
+        use flate2::read::GzDecoder;
+        let decompressed = GzDecoder::new(file);
+        extract_tar(decompressed, dest)?;
+    }
+
+    #[cfg(windows)]
+    extract_zip(file, dest)?;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn extract_tar(file: impl std::io::Read, to: &Path) -> Result<()> {
+    use tar::Archive;
+
+    let mut archive = Archive::new(file);
+    archive.unpack(to).context(ExtractSnafu {})?;
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn extract_zip(file: std::fs::File, to: &Path) -> Result<()> {
+    use zip::ZipArchive;
+
+    let mut archive = ZipArchive::new(file).context(ExtractSnafu {})?;
+    archive.extract(to).context(ExtractSnafu {})?;
+
+    Ok(())
 }
