@@ -64,13 +64,6 @@ pub async fn copy_tree(from_dir: &Path, to_dir: &Path) {
 ///
 /// Returns an error if the extraction fails. This could happen if the archive format is unsupported or
 /// if the destination path cannot be created.
-///
-/// # Example
-/// ```rust
-/// let file = std::fs::File::open("archive.tar.gz")?;
-/// let dest = Path::new("/path/to/destination");
-/// extract_archive(file, dest).await?;
-/// ```
 pub async fn extract_archive(mut file: std::fs::File, dest: &Path) -> Result<()> {
     use std::io::Seek;
     use tokio::fs;
