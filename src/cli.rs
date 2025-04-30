@@ -38,6 +38,16 @@ pub struct Cli {
 #[derive(Debug, Clone, Default)]
 pub struct CommandContext {
     pub client: WasmEdgeApiClient,
+    pub no_progress: bool,
+}
+
+impl Cli {
+    pub fn context(&self, client: WasmEdgeApiClient) -> CommandContext {
+        CommandContext {
+            client,
+            no_progress: self.quiet,
+        }
+    }
 }
 
 pub trait CommandExecutor {
@@ -63,6 +73,7 @@ impl CommandExecutor for Commands {
 
         match self {
             List(args) => args.execute(ctx).await,
+            Install(args) => args.execute(ctx).await,
             _ => todo!(),
         }
     }

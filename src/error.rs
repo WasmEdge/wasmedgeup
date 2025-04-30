@@ -12,6 +12,27 @@ pub enum Error {
     #[snafu(display("Invalid semantic version specifier"))]
     SemVer { source: semver::Error },
 
+    #[snafu(display("Error constructing release URL"))]
+    Url { source: url::ParseError },
+
+    #[snafu(display("Unable to request resource '{}'", resource))]
+    Request {
+        source: reqwest::Error,
+        resource: &'static str,
+    },
+
+    #[snafu(display("Unable to extract archive"))]
+    Extract {
+        #[cfg(unix)]
+        source: std::io::Error,
+
+        #[cfg(windows)]
+        source: zip::result::ZipError,
+    },
+
+    #[snafu(transparent)]
+    IO { source: std::io::Error },
+
     #[default]
     #[snafu(display("Unknown error occurred"))]
     Unknown,
