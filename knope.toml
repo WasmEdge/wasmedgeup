@@ -9,3 +9,4 @@ repo = "wasmedgeup"
 
 [bot.releases]
 enabled = true
+pull_request.title = "chore: release wasmedgeup $version"
