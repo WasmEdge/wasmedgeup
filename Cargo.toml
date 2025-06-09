@@ -25,7 +25,7 @@ url = "2.5.4"
 walkdir = "2.5.0"
 
 [target.'cfg(unix)'.dependencies]
-flate2 = "1.1.1"
+flate2 = "1.1.2"
 tar = "0.4.44"
 
 [target.'cfg(windows)'.dependencies]
