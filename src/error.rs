@@ -33,6 +33,13 @@ pub enum Error {
     #[snafu(transparent)]
     IO { source: std::io::Error },
 
+    #[cfg(windows)]
+    #[snafu(display("Windows Registry error: {}", source))]
+    WindowsRegistry { source: winreg::Error },
+
+    #[snafu(display("Could not determine home directory"))]
+    HomeDirNotFound,
+
     #[default]
     #[snafu(display("Unknown error occurred"))]
     Unknown,
