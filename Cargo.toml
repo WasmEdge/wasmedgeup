@@ -30,6 +30,7 @@ tar = "0.4.44"
 
 [target.'cfg(windows)'.dependencies]
 zip = "4.2.0"
+winreg = "0.52"
 
 [dev-dependencies]
 rstest = "0.25.0"
