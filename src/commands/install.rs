@@ -3,14 +3,12 @@ use std::path::PathBuf;
 use clap::Parser;
 use semver::Version;
 use snafu::ResultExt;
-use tokio::fs;
 
 use crate::{
     api::{Asset, WasmEdgeApiClient},
     cli::{CommandContext, CommandExecutor},
-    error::IoSnafu, // Import IoSnafu
     prelude::*,
-    shell_utils, // Import shell_utils
+    shell_utils,
     target::{TargetArch, TargetOS},
 };
 
@@ -62,6 +60,7 @@ impl CommandExecutor for InstallArgs {
     /// 2. Downloads the asset for the appropriate OS and architecture.
     /// 3. Unpacks the asset to a temporary directory.
     /// 4. Copies the extracted files to the target directory.
+    /// 5. Add the installed bin directory to PATH
     ///
     /// # Arguments
     ///
@@ -110,87 +109,8 @@ impl CommandExecutor for InstallArgs {
         crate::fs::copy_tree(&extracted_dir, &target_dir).await;
         tracing::debug!(target_dir = %target_dir.display(), "Copying files to target location completed");
 
-        // Create the environment file
-        let env_file_path = target_dir.join("env");
-        let env_content = format!(
-            "export PATH=\"{}/bin:$PATH\"",
-            target_dir.to_string_lossy()
-        );
-        // Remove the old generic env file creation
-        // fs::write(&env_file_path, env_content)
-        //     .await
-        //     .context(IoSnafu)?;
-        // tracing::debug!(env_file_path = %env_file_path.display(), "Environment file created successfully");
-
-        // Add to PATH
-        if cfg!(windows) {
-            // On Windows, target_dir is %USERPROFILE%\.wasmedge
-            shell_utils::setup_path(&target_dir)?;
-            println!("WasmEdge added to User PATH. Please restart your shell or log off and on for changes to take effect.");
-        } else {
-            let home_dir = dirs::home_dir().ok_or(crate::error::Error::HomeDirNotFound)?;
-            let wasmedge_dot_dir = target_dir; // This is $HOME/.wasmedge or custom path
-
-            // Ensure .wasmedge directory exists (it should, as we just installed to it)
-            fs::create_dir_all(&wasmedge_dot_dir).await.context(IoSnafu)?;
-
-            // Ensure .wasmedge directory exists (it should, as we just installed to it)
-            fs::create_dir_all(&wasmedge_dot_dir).await.context(IoSnafu)?;
-
-            let wasmedge_bin_dir_str = wasmedge_dot_dir.join("bin").to_string_lossy().to_string();
-            let shells = shell_utils::unix::get_supported_shells();
-            let mut shells_updated_count = 0;
-
-            for shell_handler in shells {
-                if shell_handler.is_present(&home_dir) {
-                    let script_details = shell_handler.env_script();
-                    let env_script_name = script_details.name; // e.g., "env.sh"
-                    let env_script_path = wasmedge_dot_dir.join(env_script_name);
-
-                    // Write the shell-specific env script
-                    let script_content = script_details.template
-                        .replace("{WASMEDGE_BIN_DIR}", &wasmedge_bin_dir_str);
-                    fs::write(&env_script_path, &script_content).await.context(IoSnafu)?;
-                    tracing::debug!(env_file_path = %env_script_path.display(), "{} script written successfully", env_script_name);
-
-                    let source_line = shell_handler.source_line(&env_script_path);
-
-                    if let Some(rc_file_path) = shell_handler.effective_rc_file(&home_dir) {
-                        // append_to_file_if_not_present will create the file if it doesn't exist.
-                        // For Nushell, effective_rc_file already ensures it found an existing file,
-                        // so this is fine. For others, it provides the standard path.
-                        // Zsh targets .zshenv, which is fine to create if not present.
-                        shell_utils::unix::append_to_file_if_not_present(&rc_file_path, &source_line).await?;
-                        println!(
-                            "Updated {} to source WasmEdge {} env. Please restart your shell or source {}.",
-                            rc_file_path.display(),
-                            shell_handler.name(),
-                            rc_file_path.display() // Suggests sourcing the rc file itself
-                        );
-                        shells_updated_count += 1;
-                    } else {
-                        // This case would primarily be for Nushell if no config file was found.
-                        println!(
-                            "Could not find an existing configuration file for {}. WasmEdge env script is at {}. Please source it manually.",
-                            shell_handler.name(),
-                            env_script_path.display()
-                        );
-                    }
-                }
-            }
-
-            if shells_updated_count > 0 {
-                println!(
-                    "WasmEdge environment scripts are available in {}. Please source the appropriate one if your shell was not automatically configured.",
-                    wasmedge_dot_dir.display()
-                );
-            } else {
-                println!(
-                    "No supported shell configuration files found or updated. WasmEdge environment scripts are available at {}. Please source the appropriate one manually.",
-                    wasmedge_dot_dir.display()
-                );
-            }
-        }
+        let install_dir = target_dir.join("bin");
+        shell_utils::setup_path(&install_dir)?;
 
         Ok(())
     }

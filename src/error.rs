@@ -37,8 +37,8 @@ pub enum Error {
     #[snafu(display("Windows Registry error: {}", source))]
     WindowsRegistry { source: winreg::Error },
 
-    #[snafu(display("Could not determine home directory"))]
-    HomeDirNotFound,
+    #[snafu(display("Parent directory not found for rc path: {}", path))]
+    RcDirNotFound { path: String },
 
     #[default]
     #[snafu(display("Unknown error occurred"))]
