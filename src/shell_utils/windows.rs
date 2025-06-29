@@ -1,5 +1,6 @@
 use crate::error::{Result, WindowsRegistrySnafu};
 use snafu::ResultExt;
+use std::path::Path;
 use winreg::enums::*;
 use winreg::RegKey;
 
@@ -10,11 +11,11 @@ pub fn setup_path(install_dir: &Path) -> Result<()> {
         .context(WindowsRegistrySnafu)?;
 
     let current_path = match env.get_value("Path") {
-        Ok(path) => path.to_str(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "",
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).context(WindowsRegistrySnafu),
     };
-    let bin_path = format!("{}\\{}", install_path, "bin");
+    let bin_path = format!("{}\\{}", install_dir.display(), "bin");
 
     // Normalize paths for comparison and to avoid duplicates with different casing
     // And since we cannot assume that the paths are ASCII strings, we can only use to_lowercase etc.

@@ -35,7 +35,7 @@ pub enum Error {
 
     #[cfg(windows)]
     #[snafu(display("Windows Registry error: {}", source))]
-    WindowsRegistry { source: winreg::Error },
+    WindowsRegistry { source: std::io::Error },
 
     #[snafu(display("Parent directory not found for rc path: {}", path))]
     RcDirNotFound { path: String },
