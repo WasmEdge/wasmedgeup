@@ -8,6 +8,7 @@ use crate::{
     api::{Asset, WasmEdgeApiClient},
     cli::{CommandContext, CommandExecutor},
     prelude::*,
+    shell_utils,
     target::{TargetArch, TargetOS},
 };
 
@@ -59,6 +60,7 @@ impl CommandExecutor for InstallArgs {
     /// 2. Downloads the asset for the appropriate OS and architecture.
     /// 3. Unpacks the asset to a temporary directory.
     /// 4. Copies the extracted files to the target directory.
+    /// 5. Add the installed bin directory to PATH
     ///
     /// # Arguments
     ///
@@ -106,6 +108,9 @@ impl CommandExecutor for InstallArgs {
         tracing::debug!(extracted_dir = %extracted_dir.display(), target_dir = %target_dir.display(), "Start copying files to target location");
         crate::fs::copy_tree(&extracted_dir, &target_dir).await;
         tracing::debug!(target_dir = %target_dir.display(), "Copying files to target location completed");
+
+        let install_dir = target_dir.join("bin");
+        shell_utils::setup_path(&install_dir)?;
 
         Ok(())
     }
