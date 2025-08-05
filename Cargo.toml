@@ -33,4 +33,4 @@ zip = "4.3.0"
 winreg = "0.55"
 
 [dev-dependencies]
-rstest = "0.25.0"
+rstest = "0.26.1"
