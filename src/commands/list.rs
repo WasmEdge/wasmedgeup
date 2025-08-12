@@ -1,7 +1,10 @@
-use crate::{api::ReleasesFilter, cli::CommandContext, prelude::*};
 use clap::Parser;
 
-use crate::cli::CommandExecutor;
+use crate::{
+    api::ReleasesFilter,
+    cli::{CommandContext, CommandExecutor},
+    prelude::*,
+};
 
 #[derive(Debug, Parser)]
 pub struct ListArgs {
@@ -21,7 +24,7 @@ impl CommandExecutor for ListArgs {
         let releases = ctx.client.releases(filter, 10)?;
         let latest_release = ctx.client.latest_release()?;
 
-        for gh_release in releases.into_iter() {
+        for gh_release in releases {
             print!("{}", gh_release);
             if gh_release == latest_release {
                 println!(" <- latest");

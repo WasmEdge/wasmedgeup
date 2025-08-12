@@ -3,42 +3,36 @@ use snafu::Snafu;
 #[derive(Debug, Default, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Unable to fetch resource '{}' for git", resource))]
-    Git {
-        source: git2::Error,
-        resource: &'static str,
+    #[snafu(display("Version '{}' not found", version))]
+    VersionNotFound { version: String },
+
+    #[snafu(display("No versions installed"))]
+    NoVersionsInstalled,
+
+    #[snafu(display("Plugin '{}' not found", plugin))]
+    PluginNotFound { plugin: String },
+
+    #[snafu(display("Invalid version format: '{}'", version))]
+    InvalidVersion { version: String },
+
+    #[snafu(display("Download failed: {}", reason))]
+    DownloadError { reason: String },
+
+    #[snafu(display("I/O error"))]
+    IO {
+        source: std::io::Error,
     },
 
-    #[snafu(display("Invalid semantic version specifier"))]
-    SemVer { source: semver::Error },
-
-    #[snafu(display("Error constructing release URL"))]
-    Url { source: url::ParseError },
-
-    #[snafu(display("Unable to request resource '{}'", resource))]
-    Request {
+    #[snafu(display("HTTP error while requesting '{}'", resource))]
+    Http {
         source: reqwest::Error,
         resource: &'static str,
     },
 
-    #[snafu(display("Unable to extract archive"))]
-    Extract {
-        #[cfg(unix)]
-        source: std::io::Error,
-
-        #[cfg(windows)]
-        source: zip::result::ZipError,
+    #[snafu(display("JSON parsing error"))]
+    Json {
+        source: serde_json::Error,
     },
-
-    #[snafu(transparent)]
-    IO { source: std::io::Error },
-
-    #[cfg(windows)]
-    #[snafu(display("Windows Registry error: {}", source))]
-    WindowsRegistry { source: std::io::Error },
-
-    #[snafu(display("Parent directory not found for rc path: {}", path))]
-    RcDirNotFound { path: String },
 
     #[default]
     #[snafu(display("Unknown error occurred"))]
