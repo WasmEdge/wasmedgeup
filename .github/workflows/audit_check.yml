@@ -3,12 +3,18 @@ name: Security audit
 on:
   push:
     paths:
+      - ".github/workflows/audit_check.yml"
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+  schedule:
+    - cron: '0 0 * * *'
 
 jobs:
   security-audit:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      checks: write
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
