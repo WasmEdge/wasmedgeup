@@ -12,8 +12,11 @@ async fn main() -> Result<()> {
     init_tracing(cli.verbose);
 
     if let Some(command) = cli.commands {
-        command.execute(ctx).await?;
-    };
+        if let Err(e) = command.execute(ctx).await {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
 
     Ok(())
 }

@@ -4,3 +4,10 @@
 use std/util "path add"
 
 path add "{WASMEDGE_BIN_DIR}"
+
+# Add library path based on platform
+if (uname) == "Linux" {
+    path add "{WASMEDGE_LIB_DIR}" LD_LIBRARY_PATH
+} else if (uname) == "Darwin" {
+    path add "{WASMEDGE_LIB_DIR}" DYLD_LIBRARY_PATH
+}

@@ -18,9 +18,7 @@ pub fn setup_path(install_dir: &Path) -> Result<()> {
             shell.write_script(&env_script, install_dir)?;
             written.push(env_script);
         }
-
-        let script_path = install_dir.join(env_script.name);
-        let source_line = shell.source_line(&script_path);
+        let source_line = shell.source_line(install_dir);
         let source_line_with_newline = format!("\n{}", &source_line);
 
         for rc in shell.effective_rc_files() {
@@ -86,8 +84,12 @@ pub trait UnixShell: Send + Sync {
 
     fn write_script(&self, script: &ShellScript, install_dir: &Path) -> Result<()> {
         let wasmedge_bin = format!("{}/bin", install_dir.to_string_lossy());
+        let wasmedge_lib = format!("{}/{}", install_dir.to_string_lossy(), LIB_DIR);
         let env_path = install_dir.join(script.name);
-        let env_content = script.template.replace("{WASMEDGE_BIN_DIR}", &wasmedge_bin);
+        let env_content = script
+            .template
+            .replace("{WASMEDGE_BIN_DIR}", &wasmedge_bin)
+            .replace("{WASMEDGE_LIB_DIR}", &wasmedge_lib);
 
         let mut file = std::fs::OpenOptions::new()
             .write(true)
