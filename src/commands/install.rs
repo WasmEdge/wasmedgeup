@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use semver::Version;
 use snafu::ResultExt;
+use tokio::fs;
 
 use crate::{
     api::{Asset, WasmEdgeApiClient},
@@ -82,35 +83,52 @@ impl CommandExecutor for InstallArgs {
         tracing::debug!(?os, ?arch, "Host OS and architecture detected");
 
         let asset = Asset::new(&version, os, arch);
-        let tmpdir = self.tmpdir.unwrap_or_else(default_tmpdir);
-        let file = ctx
+        let base_tmpdir = self.tmpdir.unwrap_or_else(default_tmpdir);
+
+        let tmpdir = base_tmpdir.join(&asset.install_name);
+        fs::create_dir_all(&tmpdir).await.inspect_err(
+            |e| tracing::error!(error = %e.to_string(), "Failed to create temporary directory"),
+        )?;
+        tracing::debug!(tmpdir = %tmpdir.display(), "Created temporary directory");
+
+        let expected_checksum = ctx
+            .client
+            .get_release_checksum(&version, &asset)
+            .await
+            .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to get checksum"))?;
+        tracing::debug!(%expected_checksum, "Got release checksum");
+
+        let named_file = ctx
             .client
             .download_asset(&asset, &tmpdir, ctx.no_progress)
             .await
             .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to download asset"))?;
 
-        tracing::debug!(file_path = %file.path().display(), dest = %tmpdir.display(), "Starting extraction of asset");
-        crate::fs::extract_archive(file.into_file(), &tmpdir)
+        let mut file = named_file.into_file();
+        WasmEdgeApiClient::verify_file_checksum(&mut file, &expected_checksum)
+            .await
+            .inspect_err(
+                |e| tracing::error!(error = %e.to_string(), "Checksum verification failed"),
+            )?;
+        tracing::debug!("Checksum verified successfully");
+
+        tracing::debug!(dest = %tmpdir.display(), "Starting extraction of asset");
+        crate::fs::extract_archive(&mut file, &tmpdir)
             .await
             .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to extract asset"))?;
         tracing::debug!(dest = %tmpdir.display(), "Extraction completed successfully");
 
-        // Try with `tmpdir/WasmEdge-{version}-{os}` first, and if it's not a directory, fallback
-        // to `tmpdir`
-        // (both patterns are used in WasmEdge)
-        let mut extracted_dir = tmpdir.join(&asset.install_name);
-        if !extracted_dir.is_dir() {
-            tracing::debug!(extracted_dir = %extracted_dir.display(), "Falling back to tmpdir as extracted directory");
-            extracted_dir = tmpdir;
-        }
-
         let target_dir = self.path.unwrap_or_else(default_path);
-        tracing::debug!(extracted_dir = %extracted_dir.display(), target_dir = %target_dir.display(), "Start copying files to target location");
-        crate::fs::copy_tree(&extracted_dir, &target_dir).await;
+        tracing::debug!(target_dir = %target_dir.display(), "Start copying files to target location");
+        crate::fs::copy_tree(&tmpdir, &target_dir).await;
         tracing::debug!(target_dir = %target_dir.display(), "Copying files to target location completed");
 
-        let install_dir = target_dir.join("bin");
-        shell_utils::setup_path(&install_dir)?;
+        fs::remove_dir_all(&tmpdir).await.inspect_err(
+            |e| tracing::error!(error = %e.to_string(), "Failed to clean up temporary directory"),
+        )?;
+        tracing::debug!(tmpdir = %tmpdir.display(), "Cleaned up temporary directory");
+
+        shell_utils::setup_path(&target_dir)?;
 
         Ok(())
     }

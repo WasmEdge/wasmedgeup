@@ -4,3 +4,5 @@
 use std/util "path add"
 
 path add "{WASMEDGE_BIN_DIR}"
+
+path add "{WASMEDGE_LIB_DIR}" LD_LIBRARY_PATH
