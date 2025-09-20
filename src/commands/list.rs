@@ -22,7 +22,7 @@ impl CommandExecutor for ListArgs {
         let latest_release = ctx.client.latest_release()?;
 
         for gh_release in releases.into_iter() {
-            print!("{}", gh_release);
+            print!("{gh_release}");
             if gh_release == latest_release {
                 println!(" <- latest");
             } else {

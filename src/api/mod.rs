@@ -128,10 +128,10 @@ impl Asset {
 
         match (os, arch) {
             (OS::Ubuntu, Arch::X86_64) => {
-                format!("WasmEdge-{}-ubuntu20.04_x86_64.tar.gz", version)
+                format!("WasmEdge-{version}-ubuntu20.04_x86_64.tar.gz")
             }
             (OS::Ubuntu, Arch::Aarch64) if is_arm_ubuntu_supported(version) => {
-                format!("WasmEdge-{}-ubuntu20.04_aarch64.tar.gz", version)
+                format!("WasmEdge-{version}-ubuntu20.04_aarch64.tar.gz")
             }
             (OS::Linux | OS::Ubuntu, arch) => {
                 let manylinux_version = if is_manylinux2014_supported(version) {
@@ -143,16 +143,16 @@ impl Asset {
                     Arch::X86_64 => "x86_64",
                     Arch::Aarch64 => "aarch64",
                 };
-                format!("WasmEdge-{}-{}_{}.tar.gz", version, manylinux_version, arch)
+                format!("WasmEdge-{version}-{manylinux_version}_{arch}.tar.gz")
             }
             (OS::Darwin, Arch::X86_64) => {
-                format!("WasmEdge-{}-darwin_x86_64.tar.gz", version)
+                format!("WasmEdge-{version}-darwin_x86_64.tar.gz")
             }
             (OS::Darwin, Arch::Aarch64) => {
-                format!("WasmEdge-{}-darwin_arm64.tar.gz", version)
+                format!("WasmEdge-{version}-darwin_arm64.tar.gz")
             }
             (OS::Windows, _) => {
-                format!("WasmEdge-{}-windows.zip", version)
+                format!("WasmEdge-{version}-windows.zip")
             }
         }
     }
@@ -161,9 +161,9 @@ impl Asset {
         use TargetOS as OS;
 
         match os {
-            OS::Linux | OS::Ubuntu => format!("WasmEdge-{}-Linux", version),
-            OS::Darwin => format!("WasmEdge-{}-Darwin", version),
-            OS::Windows => format!("WasmEdge-{}-Windows", version),
+            OS::Linux | OS::Ubuntu => format!("WasmEdge-{version}-Linux"),
+            OS::Darwin => format!("WasmEdge-{version}-Darwin"),
+            OS::Windows => format!("WasmEdge-{version}-Windows"),
         }
     }
 }
