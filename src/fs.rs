@@ -1,6 +1,14 @@
 use crate::prelude::*;
 use snafu::ResultExt;
 
+use std::io::Seek;
+
+#[cfg(unix)]
+use std::os::unix::fs::symlink as symlink_unix;
+
+#[cfg(windows)]
+use std::os::windows::fs::{symlink_dir, symlink_file};
+
 use std::path::{Path, PathBuf};
 
 use tokio::fs;
@@ -14,7 +22,7 @@ pub async fn copy_tree(from_dir: &Path, to_dir: &Path) {
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
-        if !metadata.is_file() {
+        if !metadata.is_file() && !metadata.is_symlink() {
             continue;
         }
 
@@ -41,8 +49,41 @@ pub async fn copy_tree(from_dir: &Path, to_dir: &Path) {
             tracing::warn!(error = %e, directories = %parent.display(), "Failed to create directories");
             continue;
         };
+        if metadata.is_symlink() {
+            if let Ok(target) = std::fs::read_link(entry.path()) {
+                #[cfg(unix)]
+                {
+                    if let Err(e) = symlink_unix(&target, &target_loc) {
+                        tracing::warn!(
+                            error = %e,
+                            entry = %entry.path().display(),
+                            target_loc = %target_loc.display(),
+                            "Failed to create symlink"
+                        );
+                    }
+                }
 
-        if let Err(e) = fs::copy(entry.path(), &target_loc).await {
+                #[cfg(windows)]
+                {
+                    let is_dir = std::fs::metadata(entry.path())
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false);
+                    let res = if is_dir {
+                        symlink_dir(&target, &target_loc)
+                    } else {
+                        symlink_file(&target, &target_loc)
+                    };
+                    if let Err(e) = res {
+                        tracing::warn!(
+                            error = %e,
+                            entry = %entry.path().display(),
+                            target_loc = %target_loc.display(),
+                            "Failed to create symlink (Windows)"
+                        );
+                    }
+                }
+            }
+        } else if let Err(e) = fs::copy(entry.path(), &target_loc).await {
             tracing::warn!(
                 error = %e,
                 entry = %entry.path().display(),
@@ -64,10 +105,7 @@ pub async fn copy_tree(from_dir: &Path, to_dir: &Path) {
 ///
 /// Returns an error if the extraction fails. This could happen if the archive format is unsupported or
 /// if the destination path cannot be created.
-pub async fn extract_archive(mut file: std::fs::File, dest: &Path) -> Result<()> {
-    use std::io::Seek;
-    use tokio::fs;
-
+pub async fn extract_archive(file: &mut std::fs::File, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest).await.inspect_err(
         |e| tracing::error!(error = %e.to_string(), "Failed to create directory during extraction"),
     )?;
@@ -97,7 +135,7 @@ fn extract_tar(file: impl std::io::Read, to: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn extract_zip(file: std::fs::File, to: &Path) -> Result<()> {
+fn extract_zip(file: &mut std::fs::File, to: &Path) -> Result<()> {
     use zip::ZipArchive;
 
     let mut archive = ZipArchive::new(file).context(ExtractSnafu {})?;

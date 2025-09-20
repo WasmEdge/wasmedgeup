@@ -1,4 +1,9 @@
-use std::{fmt::Write, path::Path, sync::OnceLock};
+use std::{
+    fmt::Write,
+    io::{Read, Seek},
+    path::Path,
+    sync::OnceLock,
+};
 
 use crate::{
     prelude::*,
@@ -10,6 +15,7 @@ pub use releases::ReleasesFilter;
 
 use reqwest::Response;
 use semver::{Comparator, Prerelease, Version, VersionReq};
+use sha2::{Digest, Sha256};
 use snafu::ResultExt;
 use tempfile::NamedTempFile;
 use tokio::{
@@ -24,6 +30,7 @@ pub struct WasmEdgeApiClient {}
 const WASM_EDGE_GIT_URL: &str = "https://github.com/WasmEdge/WasmEdge.git";
 const WASM_EDGE_RELEASE_ASSET_BASE_URL: &str =
     "https://github.com/WasmEdge/WasmEdge/releases/download";
+const CHECKSUM_FILE_NAME: &str = "SHA256SUM";
 
 impl WasmEdgeApiClient {
     pub fn releases(&self, filter: ReleasesFilter, num_releases: usize) -> Result<Vec<Version>> {
@@ -56,6 +63,92 @@ impl WasmEdgeApiClient {
         drop(async_file);
 
         Ok(named)
+    }
+
+    pub async fn get_release_checksum(&self, version: &Version, asset: &Asset) -> Result<String> {
+        let mut url = Url::parse(WASM_EDGE_RELEASE_ASSET_BASE_URL)
+            .expect("WASM_EDGE_RELEASE_ASSET_BASE_URL must be a valid URL");
+
+        url.path_segments_mut()
+            .expect("base is valid URL")
+            .extend(&[&version.to_string(), CHECKSUM_FILE_NAME]);
+
+        tracing::debug!(%url, CHECKSUM_FILE_NAME, "Trying checksum file");
+
+        let response = reqwest::get(url).await.context(RequestSnafu {
+            resource: "checksums",
+        })?;
+
+        if !response.status().is_success() {
+            tracing::debug!(
+                status = %response.status(),
+                file = CHECKSUM_FILE_NAME,
+                "Checksum file not found"
+            );
+            return Err(Error::ChecksumNotFound {
+                version: version.to_string(),
+                asset: asset.archive_name.clone(),
+            });
+        }
+
+        let content = response.text().await.context(RequestSnafu {
+            resource: "checksums",
+        })?;
+
+        tracing::debug!(
+            lines = content.lines().count(),
+            file = CHECKSUM_FILE_NAME,
+            "Got checksum file content"
+        );
+
+        for (i, line) in content.lines().enumerate() {
+            tracing::debug!(line_num = i, line = line, "Processing checksum line");
+
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() == 2 {
+                tracing::debug!(checksum = parts[0], file = parts[1], "Found checksum entry");
+
+                if parts[1] == asset.archive_name {
+                    tracing::debug!(checksum = parts[0], "Found matching checksum");
+                    return Ok(parts[0].to_string());
+                }
+            }
+        }
+
+        tracing::error!(
+            version = %version,
+            asset = %asset.archive_name,
+            "No checksum found in any file"
+        );
+
+        Err(Error::ChecksumNotFound {
+            version: version.to_string(),
+            asset: asset.archive_name.clone(),
+        })
+    }
+
+    pub async fn verify_file_checksum(file: &mut std::fs::File, expected: &str) -> Result<()> {
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 8192];
+
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
+
+        let actual = hex::encode(hasher.finalize());
+        if actual != expected {
+            return Err(Error::ChecksumMismatch {
+                expected: expected.to_string(),
+                actual,
+            });
+        }
+
+        file.rewind()?;
+        Ok(())
     }
 }
 

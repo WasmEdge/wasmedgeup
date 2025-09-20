@@ -11,3 +11,13 @@ case ":${PATH}:" in
         export PATH="{WASMEDGE_BIN_DIR}:$PATH"
         ;;
 esac
+
+# Handle LD_LIBRARY_PATH
+case ":${LD_LIBRARY_PATH:=}:" in
+    *:"{WASMEDGE_LIB_DIR}":*)
+        ;;
+    *)
+        # Prepending library path
+        export LD_LIBRARY_PATH="{WASMEDGE_LIB_DIR}:${LD_LIBRARY_PATH}"
+        ;;
+esac
