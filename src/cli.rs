@@ -5,6 +5,7 @@ use crate::commands::install::InstallArgs;
 use crate::commands::list::ListArgs;
 use crate::commands::plugin::PluginCli;
 use crate::commands::remove::RemoveArgs;
+use crate::commands::use_cmd::UseArgs;
 use crate::prelude::*;
 use clap::builder::styling::AnsiColor;
 use clap::{builder::Styles, Parser, Subcommand};
@@ -58,6 +59,8 @@ pub trait CommandExecutor {
 pub enum Commands {
     /// Install a specified WasmEdge runtime version
     Install(InstallArgs),
+    /// Switch to a specified WasmEdge runtime version
+    Use(UseArgs),
     /// Lists available WasmEdge releases.
     /// By default, only stable releases are shown.
     List(ListArgs),
@@ -74,6 +77,7 @@ impl CommandExecutor for Commands {
         match self {
             List(args) => args.execute(ctx).await,
             Install(args) => args.execute(ctx).await,
+            Use(args) => args.execute(ctx).await,
             _ => todo!(),
         }
     }

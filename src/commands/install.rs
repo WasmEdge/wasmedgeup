@@ -1,22 +1,16 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use semver::Version;
-use snafu::ResultExt;
 use tokio::fs;
 
 use crate::{
     api::{Asset, WasmEdgeApiClient},
     cli::{CommandContext, CommandExecutor},
+    commands::default_path,
     prelude::*,
     shell_utils,
     target::{TargetArch, TargetOS},
 };
-
-fn default_path() -> PathBuf {
-    let home_dir = dirs::home_dir().expect("home_dir should be present");
-    home_dir.join(".wasmedge")
-}
 
 fn default_tmpdir() -> PathBuf {
     std::env::temp_dir()
@@ -81,7 +75,7 @@ impl CommandExecutor for InstallArgs {
     /// or copying issues.
     #[tracing::instrument(name = "install", skip_all, fields(version = self.version))]
     async fn execute(mut self, ctx: CommandContext) -> Result<()> {
-        let version = self.resolve_version(&ctx.client).inspect_err(
+        let version = ctx.client.resolve_version(&self.version).inspect_err(
             |e| tracing::error!(error = %e.to_string(), "Failed to resolve version"),
         )?;
         tracing::debug!(%version, "Resolved version for installation");
@@ -177,6 +171,12 @@ impl CommandExecutor for InstallArgs {
             }
         }
 
+        let version_dir = target_dir.join("versions").join(version.to_string());
+        fs::create_dir_all(&version_dir).await.inspect_err(
+            |e| tracing::error!(error = %e.to_string(), "Failed to create version directory"),
+        )?;
+        tracing::debug!(version_dir = %version_dir.display(), "Created version directory");
+
         let mut read_dir = fs::read_dir(&tmpdir).await?;
         let mut source_dir = tmpdir.clone();
 
@@ -197,27 +197,19 @@ impl CommandExecutor for InstallArgs {
             });
         }
 
-        tracing::debug!(source_dir = %source_dir.display(), "Start copying files to target location");
-        crate::fs::copy_tree(&source_dir, &target_dir).await?;
-        tracing::debug!(target_dir = %target_dir.display(), "Copying files to target location completed");
+        tracing::debug!(source_dir = %source_dir.display(), "Start copying files to version directory");
+        crate::fs::copy_tree(&source_dir, &version_dir).await?;
+        tracing::debug!(version_dir = %version_dir.display(), "Copying files to version directory completed");
 
         fs::remove_dir_all(&tmpdir).await.inspect_err(
             |e| tracing::error!(error = %e.to_string(), "Failed to clean up temporary directory"),
         )?;
         tracing::debug!(tmpdir = %tmpdir.display(), "Cleaned up temporary directory");
 
+        tracing::debug!("Creating version symlinks");
+        crate::fs::create_version_symlinks(&target_dir, &version.to_string()).await?;
         shell_utils::setup_path(&target_dir)?;
 
         Ok(())
-    }
-}
-
-impl InstallArgs {
-    fn resolve_version(&self, client: &WasmEdgeApiClient) -> Result<Version> {
-        if self.version == "latest" {
-            client.latest_release()
-        } else {
-            Version::parse(&self.version).context(SemVerSnafu {})
-        }
     }
 }
