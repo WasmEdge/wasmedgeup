@@ -305,7 +305,7 @@ fn append_file(path: &Path, line: &str) -> Result<()> {
         .create(true)
         .open(path)?;
 
-    writeln!(file, "{}", line)?;
+    writeln!(file, "{line}")?;
 
     file.sync_data()?;
 

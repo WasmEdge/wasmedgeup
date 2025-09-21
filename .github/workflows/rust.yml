@@ -35,6 +35,23 @@ jobs:
       - name: Check formatting (rustfmt)
         run: cargo fmt --all --check
 
+  clippy:
+    runs-on: ubuntu-latest
+    name: Clippy
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup rust toolchain
+        uses: ./.github/actions/setup-rust
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
   build:
     strategy:
       matrix:
