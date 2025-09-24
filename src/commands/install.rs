@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use semver::Version;
 use snafu::ResultExt;
+use tokio::fs;
 
 use crate::{
     api::{Asset, WasmEdgeApiClient},
@@ -19,6 +20,14 @@ fn default_path() -> PathBuf {
 
 fn default_tmpdir() -> PathBuf {
     std::env::temp_dir()
+}
+
+fn get_system_install_info() -> (String, String) {
+    if cfg!(windows) {
+        ("C:\\Program Files\\WasmEdge".to_string(), "".to_string())
+    } else {
+        ("/usr/local".to_string(), "sudo ".to_string())
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -82,35 +91,122 @@ impl CommandExecutor for InstallArgs {
         tracing::debug!(?os, ?arch, "Host OS and architecture detected");
 
         let asset = Asset::new(&version, os, arch);
-        let tmpdir = self.tmpdir.unwrap_or_else(default_tmpdir);
-        let file = ctx
+
+        // Create a dedicated temporary workspace for this installation. This provides isolation
+        // between concurrent installations and ensures consistent handling of different archive
+        // structures. The source path for copying will be either:
+        //   - /tmp/WasmEdge-version-os/ (for archives with root-level files)
+        //   - /tmp/WasmEdge-version-os/WasmEdge-version-os/ (for nested archives)
+        let tmpdir = self
+            .tmpdir
+            .unwrap_or_else(default_tmpdir)
+            .join(&asset.install_name);
+        fs::create_dir_all(&tmpdir).await.inspect_err(
+            |e| tracing::error!(error = %e.to_string(), "Failed to create temporary directory"),
+        )?;
+        tracing::debug!(tmpdir = %tmpdir.display(), "Created temporary directory");
+
+        let expected_checksum = ctx
+            .client
+            .get_release_checksum(&version, &asset)
+            .await
+            .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to get checksum"))?;
+        tracing::debug!(%expected_checksum, "Got release checksum");
+
+        let mut file = ctx
             .client
             .download_asset(&asset, &tmpdir, ctx.no_progress)
             .await
-            .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to download asset"))?;
+            .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to download asset"))?
+            .into_file();
+        WasmEdgeApiClient::verify_file_checksum(&mut file, &expected_checksum)
+            .await
+            .inspect_err(
+                |e| tracing::error!(error = %e.to_string(), "Checksum verification failed"),
+            )?;
+        tracing::debug!("Checksum verified successfully");
 
-        tracing::debug!(file_path = %file.path().display(), dest = %tmpdir.display(), "Starting extraction of asset");
-        crate::fs::extract_archive(file.into_file(), &tmpdir)
+        tracing::debug!(dest = %tmpdir.display(), "Starting extraction of asset");
+        crate::fs::extract_archive(&mut file, &tmpdir)
             .await
             .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to extract asset"))?;
         tracing::debug!(dest = %tmpdir.display(), "Extraction completed successfully");
 
-        // Try with `tmpdir/WasmEdge-{version}-{os}` first, and if it's not a directory, fallback
-        // to `tmpdir`
-        // (both patterns are used in WasmEdge)
-        let mut extracted_dir = tmpdir.join(&asset.install_name);
-        if !extracted_dir.is_dir() {
-            tracing::debug!(extracted_dir = %extracted_dir.display(), "Falling back to tmpdir as extracted directory");
-            extracted_dir = tmpdir;
+        let target_dir = self.path.unwrap_or_else(default_path);
+
+        if target_dir.exists() {
+            if !crate::fs::can_write_to_directory(&target_dir) {
+                tracing::debug!(path = %target_dir.display(), "Installation requires elevated permissions");
+                let (system_dir, sudo) = get_system_install_info();
+                return Err(Error::InsufficientPermissions {
+                    path: target_dir.display().to_string(),
+                    action: "write to target directory".to_string(),
+                    version: version.to_string(),
+                    system_dir,
+                    sudo,
+                });
+            }
+            tracing::debug!(target_dir = %target_dir.display(), "Verified write permissions");
+        } else {
+            match fs::create_dir_all(&target_dir).await {
+                Ok(_) => {
+                    if !crate::fs::can_write_to_directory(&target_dir) {
+                        tracing::debug!(path = %target_dir.display(), "Created directory but cannot write to it");
+                        let (system_dir, sudo) = get_system_install_info();
+                        return Err(Error::InsufficientPermissions {
+                            path: target_dir.display().to_string(),
+                            action: "write to target directory".to_string(),
+                            version: version.to_string(),
+                            system_dir,
+                            sudo,
+                        });
+                    }
+                    tracing::debug!(target_dir = %target_dir.display(), "Created target directory");
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, path = %target_dir.display(), "Failed to create directory");
+                    let (system_dir, sudo) = get_system_install_info();
+                    return Err(Error::InsufficientPermissions {
+                        path: target_dir.display().to_string(),
+                        action: "create directory".to_string(),
+                        version: version.to_string(),
+                        system_dir,
+                        sudo,
+                    });
+                }
+            }
         }
 
-        let target_dir = self.path.unwrap_or_else(default_path);
-        tracing::debug!(extracted_dir = %extracted_dir.display(), target_dir = %target_dir.display(), "Start copying files to target location");
-        crate::fs::copy_tree(&extracted_dir, &target_dir).await;
+        let mut read_dir = fs::read_dir(&tmpdir).await?;
+        let mut source_dir = tmpdir.clone();
+
+        if let Some(entry) = read_dir.next_entry().await? {
+            let file_name = entry.file_name().into_string().unwrap_or_default();
+            if file_name.starts_with("WasmEdge-") && entry.file_type().await?.is_dir() {
+                source_dir = entry.path();
+            } else if !matches!(file_name.as_str(), "bin" | "lib64" | "include" | "lib") {
+                tracing::debug!(found_file = %file_name, "Unexpected file found in archive");
+                return Err(Error::InvalidArchiveStructure {
+                    found_file: file_name,
+                });
+            }
+        } else {
+            tracing::debug!(dir = %tmpdir.display(), "Archive directory is empty");
+            return Err(Error::InvalidArchiveStructure {
+                found_file: "<empty directory>".to_string(),
+            });
+        }
+
+        tracing::debug!(source_dir = %source_dir.display(), "Start copying files to target location");
+        crate::fs::copy_tree(&source_dir, &target_dir).await?;
         tracing::debug!(target_dir = %target_dir.display(), "Copying files to target location completed");
 
-        let install_dir = target_dir.join("bin");
-        shell_utils::setup_path(&install_dir)?;
+        fs::remove_dir_all(&tmpdir).await.inspect_err(
+            |e| tracing::error!(error = %e.to_string(), "Failed to clean up temporary directory"),
+        )?;
+        tracing::debug!(tmpdir = %tmpdir.display(), "Cleaned up temporary directory");
+
+        shell_utils::setup_path(&target_dir)?;
 
         Ok(())
     }

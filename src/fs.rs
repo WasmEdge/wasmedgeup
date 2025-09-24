@@ -1,37 +1,68 @@
 use crate::prelude::*;
 use snafu::ResultExt;
 
-use std::path::{Path, PathBuf};
+use std::io::Seek;
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink as symlink_unix;
+
+use std::path::Path;
+
+#[cfg(windows)]
+use std::os::windows::fs::{symlink_dir, symlink_file};
+#[cfg(windows)]
+use std::path::Component;
+
+use std::fs::OpenOptions;
 use tokio::fs;
 use walkdir::WalkDir;
 
-pub async fn copy_tree(from_dir: &Path, to_dir: &Path) {
-    let num_components = from_dir.components().count();
+pub fn can_write_to_directory(path: &Path) -> bool {
+    let test_file = path.join(".wasmedgeup_write_test");
+    let can_write = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&test_file)
+        .is_ok();
 
+    if test_file.exists() {
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    can_write
+}
+
+pub async fn copy_tree(from_dir: &Path, to_dir: &Path) -> Result<()> {
     for entry in WalkDir::new(from_dir).into_iter().filter_map(|e| e.ok()) {
         tracing::trace!(entry = %entry.path().display(), "Copying entry");
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
-        if !metadata.is_file() {
+        if !metadata.is_file() && !metadata.is_symlink() {
             continue;
         }
 
-        // Calculate the target location based on from_dir, to_dir, and entry
-        // by first calculate the path of entry relative to from_dir, and then append it to to_dir
+        // Calculate the target location by stripping the source directory prefix
+        // from the entry path and appending it to the destination directory.
+        // During this process, any 'lib64' directory is renamed to 'lib' for consistency.
         //
         // # Example
-        // from_dir = '/from/path
-        // entry = '/from/path/foo/bar/something.txt'
+        // from_dir = '/from/path'
+        // entry = '/from/path/foo/lib64/something.so'
         // to_dir = '/to/path'
-        // => num_components = 3 ([RootDir, "from", "path"])
-        // => chained = [RootDir, "to", "path"].chain(["foo", "bar", "something.txt"])
-        // => target_loc = "/to/path/foo/bar/something.txt"
-        let target_loc = to_dir
-            .components()
-            .chain(entry.path().components().skip(num_components))
-            .collect::<PathBuf>();
+        //
+        // 1. Strip prefix: 'foo/lib64/something.so'
+        // 2. Replace lib64: 'foo/lib/something.so'
+        // 3. Join with to_dir: '/to/path/foo/lib/something.so'
+        let target_loc = to_dir.join(
+            entry
+                .path()
+                .strip_prefix(from_dir)
+                .unwrap_or(entry.path())
+                .to_string_lossy()
+                .replace("lib64", LIB_DIR),
+        );
 
         let Some(parent) = target_loc.parent() else {
             tracing::warn!(location = %target_loc.display(), "Missing parent for target location");
@@ -41,8 +72,92 @@ pub async fn copy_tree(from_dir: &Path, to_dir: &Path) {
             tracing::warn!(error = %e, directories = %parent.display(), "Failed to create directories");
             continue;
         };
+        if metadata.is_symlink() {
+            if let Ok(target) = std::fs::read_link(entry.path()) {
+                if target_loc.exists() {
+                    match fs::remove_file(&target_loc).await {
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                            #[cfg(windows)]
+                            return Err(Error::WindowsSymlinkError {
+                                version: std::env::var("WASMEDGE_VERSION")
+                                    .unwrap_or_else(|_| "latest".to_string()),
+                            });
 
-        if let Err(e) = fs::copy(entry.path(), &target_loc).await {
+                            #[cfg(not(windows))]
+                            tracing::warn!(
+                                error = %e,
+                                path = %target_loc.display(),
+                                "Failed to remove existing symlink due to permissions"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                path = %target_loc.display(),
+                                "Failed to remove existing symlink"
+                            );
+                        }
+                    }
+                }
+
+                #[cfg(unix)]
+                {
+                    if let Err(e) = symlink_unix(&target, &target_loc) {
+                        tracing::warn!(
+                            error = %e,
+                            entry = %entry.path().display(),
+                            target_loc = %target_loc.display(),
+                            "Failed to create symlink"
+                        );
+                    }
+                }
+
+                #[cfg(windows)]
+                {
+                    let is_dir = std::fs::metadata(entry.path())
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false);
+
+                    if target_loc.exists() {
+                        let remove_result = if is_dir {
+                            fs::remove_dir(&target_loc).await
+                        } else {
+                            fs::remove_file(&target_loc).await
+                        };
+                        if let Err(e) = remove_result {
+                            tracing::warn!(
+                                error = %e,
+                                path = %target_loc.display(),
+                                "Failed to remove existing symlink"
+                            );
+                            continue;
+                        }
+                    }
+
+                    let res = if is_dir {
+                        symlink_dir(&target, &target_loc)
+                    } else {
+                        symlink_file(&target, &target_loc)
+                    };
+                    if let Err(e) = res {
+                        if e.kind() == std::io::ErrorKind::PermissionDenied {
+                            #[cfg(windows)]
+                            return Err(Error::WindowsSymlinkError {
+                                version: std::env::var("WASMEDGE_VERSION")
+                                    .unwrap_or_else(|_| "latest".to_string()),
+                            });
+                        }
+                        tracing::warn!(
+                            error = %e,
+                            entry = %entry.path().display(),
+                            target_loc = %target_loc.display(),
+                            "Failed to create symlink (Windows)"
+                        );
+                    }
+                }
+            }
+        } else if let Err(e) = fs::copy(entry.path(), &target_loc).await {
             tracing::warn!(
                 error = %e,
                 entry = %entry.path().display(),
@@ -51,6 +166,7 @@ pub async fn copy_tree(from_dir: &Path, to_dir: &Path) {
             );
         };
     }
+    Ok(())
 }
 
 /// Extracts the contents of a compressed archive (`.tar.gz` for Unix-like systems, `.zip` for Windows) to a specified directory.
@@ -64,10 +180,7 @@ pub async fn copy_tree(from_dir: &Path, to_dir: &Path) {
 ///
 /// Returns an error if the extraction fails. This could happen if the archive format is unsupported or
 /// if the destination path cannot be created.
-pub async fn extract_archive(mut file: std::fs::File, dest: &Path) -> Result<()> {
-    use std::io::Seek;
-    use tokio::fs;
-
+pub async fn extract_archive(file: &mut std::fs::File, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest).await.inspect_err(
         |e| tracing::error!(error = %e.to_string(), "Failed to create directory during extraction"),
     )?;
@@ -97,7 +210,7 @@ fn extract_tar(file: impl std::io::Read, to: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn extract_zip(file: std::fs::File, to: &Path) -> Result<()> {
+fn extract_zip(file: &mut std::fs::File, to: &Path) -> Result<()> {
     use zip::ZipArchive;
 
     let mut archive = ZipArchive::new(file).context(ExtractSnafu {})?;
