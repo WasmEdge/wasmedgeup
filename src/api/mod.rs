@@ -13,7 +13,7 @@ pub mod releases;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 pub use releases::ReleasesFilter;
 
-use reqwest::Response;
+use reqwest::{Client, Response};
 use semver::{Comparator, Prerelease, Version, VersionReq};
 use sha2::{Digest, Sha256};
 use snafu::ResultExt;
@@ -34,6 +34,18 @@ const CHECKSUM_FILE_NAME: &str = "SHA256SUM";
 const BUFFER_SIZE: usize = 8 * 1024; // 8KB
 
 impl WasmEdgeApiClient {
+    fn http_client() -> Client {
+        reqwest::ClientBuilder::new()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(600))
+            .user_agent(format!(
+                "wasmedgeup/{} (+https://github.com/WasmEdge/wasmedgeup)",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .build()
+            .expect("Failed to build reqwest client")
+    }
+
     pub fn releases(&self, filter: ReleasesFilter, num_releases: usize) -> Result<Vec<Version>> {
         let releases = releases::get_all(WASM_EDGE_GIT_URL, filter)?;
         Ok(releases.into_iter().take(num_releases).collect())
@@ -42,6 +54,14 @@ impl WasmEdgeApiClient {
     pub fn latest_release(&self) -> Result<Version> {
         let releases = releases::get_all(WASM_EDGE_GIT_URL, ReleasesFilter::Stable)?;
         releases.into_iter().next().ok_or(Error::Unknown)
+    }
+
+    pub fn resolve_version(&self, version: &str) -> Result<Version> {
+        if version == "latest" {
+            self.latest_release()
+        } else {
+            Version::parse(version).context(SemVerSnafu {})
+        }
     }
 
     pub async fn download_asset(
@@ -53,7 +73,8 @@ impl WasmEdgeApiClient {
         let url = asset.url()?;
         tracing::debug!(%url, "Starting download for asset");
 
-        let response = reqwest::get(url).await.context(RequestSnafu {
+        let client = Self::http_client();
+        let response = client.get(url).send().await.context(RequestSnafu {
             resource: "asset download",
         })?;
 
@@ -76,7 +97,8 @@ impl WasmEdgeApiClient {
 
         tracing::debug!(%url, CHECKSUM_FILE_NAME, "Trying checksum file");
 
-        let response = reqwest::get(url).await.context(RequestSnafu {
+        let client = Self::http_client();
+        let response = client.get(url).send().await.context(RequestSnafu {
             resource: "checksums",
         })?;
 

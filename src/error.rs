@@ -3,6 +3,9 @@ use snafu::Snafu;
 #[derive(Debug, Default, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Version {version} not found in wasmedge installation"))]
+    VersionNotFound { version: String },
+
     #[snafu(display("Unable to fetch resource '{}' for git", resource))]
     Git {
         source: git2::Error,
