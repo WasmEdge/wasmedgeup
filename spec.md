@@ -78,6 +78,23 @@ Options
   - Usage: `--path /usr/local`
   - Default: `$HOME/.wasmedge`
 
+##### Command `Remove`
+
+Uninstalls WasmEdge versions from the system.
+
+Arguments
+
+1. `remove <specific version, e.g. 0.15.0>`: Uninstalls the specified installed version.
+
+Options
+
+- `--all`
+  - Description: Remove all installed versions and configuration under the target directory.
+- `-p`, `--path`
+  - Description: Set the installed location
+  - Usage: `--path /usr/local`
+  - Default: `$HOME/.wasmedge`
+
 #### Global Options
 
 1. `-V`, `--version`: Prints wasmedgeup installer version (not the runtime)

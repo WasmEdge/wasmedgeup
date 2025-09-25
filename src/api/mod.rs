@@ -344,3 +344,24 @@ fn download_progress_bar(size: u64) -> ProgressBar {
 
     pb
 }
+
+pub fn latest_installed_version(versions_dir: &Path) -> Result<Option<Version>> {
+    if !versions_dir.exists() {
+        return Ok(None);
+    }
+
+    let mut versions = Vec::new();
+    for entry in std::fs::read_dir(versions_dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            if let Some(name) = entry.file_name().to_str() {
+                if let Ok(ver) = Version::parse(name) {
+                    versions.push(ver);
+                }
+            }
+        }
+    }
+
+    versions.sort_by(|a, b| b.cmp(a));
+    Ok(versions.into_iter().next())
+}

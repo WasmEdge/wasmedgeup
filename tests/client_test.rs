@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};
 use tempfile::NamedTempFile;
 use wasmedgeup::{
-    api::{Asset, WasmEdgeApiClient},
+    api::{latest_installed_version, Asset, WasmEdgeApiClient},
     commands::install::InstallArgs,
     error::Error,
 };
@@ -50,8 +50,33 @@ async fn test_checksum_verification() {
                 "608a068b33d18be838bcb07bed01e35521d30840fa24db09192e67bfd186e621"
             ); // Actual SHA256 of "different data"
         }
+
         _ => panic!("Expected ChecksumMismatch error"),
     }
+}
+
+#[test]
+fn test_latest_installed_version_basic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let versions_dir = root.join("versions");
+    std::fs::create_dir_all(versions_dir.join("0.9.0")).unwrap();
+    std::fs::create_dir_all(versions_dir.join("0.15.0")).unwrap();
+    std::fs::create_dir_all(versions_dir.join("not-a-version")).unwrap();
+
+    let latest = latest_installed_version(&versions_dir).unwrap();
+    assert_eq!(latest, Some(Version::parse("0.15.0").unwrap()));
+}
+
+#[test]
+fn test_latest_installed_version_prerelease() {
+    let tmp = tempfile::tempdir().unwrap();
+    let versions_dir = tmp.path().join("versions");
+    std::fs::create_dir_all(versions_dir.join("0.15.0-rc.1")).unwrap();
+    std::fs::create_dir_all(versions_dir.join("0.15.0")).unwrap();
+
+    let latest = latest_installed_version(&versions_dir).unwrap();
+    assert_eq!(latest.unwrap(), Version::parse("0.15.0").unwrap());
 }
 
 #[tokio::test]
