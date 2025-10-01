@@ -218,3 +218,98 @@ fn extract_zip(file: &mut std::fs::File, to: &Path) -> Result<()> {
 
     Ok(())
 }
+
+/// Creates or updates symlinks for a WasmEdge version installation.
+///
+/// Creates the following symlinks in the base directory:
+/// - bin -> versions/<version>/bin
+/// - include -> versions/<version>/include
+/// - lib -> versions/<version>/lib
+///
+/// # Arguments
+///
+/// * `base_dir` - The base WasmEdge installation directory (e.g., ~/.wasmedge)
+/// * `version` - The version being installed (e.g., "0.15.0")
+///
+/// # Errors
+///
+/// Returns an error if creating or updating symlinks fails.
+pub async fn create_version_symlinks(base_dir: &Path, version: &str) -> Result<()> {
+    let symlink_dirs = ["bin", "include", "lib"];
+
+    for dir in symlink_dirs {
+        let symlink_path = base_dir.join(dir);
+
+        #[cfg(unix)]
+        let target_path = format!("versions/{version}/{dir}");
+        #[cfg(windows)]
+        let target_path = base_dir.join("versions").join(version).join(dir);
+
+        if let Ok(meta) = fs::symlink_metadata(&symlink_path).await {
+            let file_type = meta.file_type();
+
+            #[cfg(windows)]
+            {
+                use tokio::fs::{remove_dir, remove_dir_all, remove_file};
+
+                if file_type.is_symlink() {
+                    match remove_dir(&symlink_path).await {
+                        Ok(_) => {}
+                        Err(_) => {
+                            remove_file(&symlink_path).await.context(IoSnafu {
+                                path: symlink_path.display().to_string(),
+                                action: "remove old symlink".to_string(),
+                            })?;
+                        }
+                    }
+                } else if file_type.is_dir() {
+                    remove_dir_all(&symlink_path).await.context(IoSnafu {
+                        path: symlink_path.display().to_string(),
+                        action: "remove existing directory before creating symlink".to_string(),
+                    })?;
+                } else {
+                    remove_file(&symlink_path).await.context(IoSnafu {
+                        path: symlink_path.display().to_string(),
+                        action: "remove existing file before creating symlink".to_string(),
+                    })?;
+                }
+            }
+
+            #[cfg(unix)]
+            {
+                if file_type.is_symlink() || file_type.is_file() {
+                    fs::remove_file(&symlink_path).await.context(IoSnafu {
+                        path: symlink_path.display().to_string(),
+                        action: "remove old symlink".to_string(),
+                    })?;
+                } else if file_type.is_dir() {
+                    fs::remove_dir_all(&symlink_path).await.context(IoSnafu {
+                        path: symlink_path.display().to_string(),
+                        action: "remove existing directory before creating symlink".to_string(),
+                    })?;
+                }
+            }
+        }
+
+        #[cfg(unix)]
+        {
+            symlink_unix(&target_path, &symlink_path).context(IoSnafu {
+                path: symlink_path.display().to_string(),
+                action: "create symlink".to_string(),
+            })?;
+        }
+        #[cfg(windows)]
+        {
+            symlink_dir(&target_path, &symlink_path).context(IoSnafu {
+                path: symlink_path.display().to_string(),
+                action: "create symlink".to_string(),
+            })?;
+        }
+        #[cfg(unix)]
+        tracing::debug!(symlink = %symlink_path.display(), target = %target_path, "Created symlink");
+        #[cfg(windows)]
+        tracing::debug!(symlink = %symlink_path.display(), target = %target_path.display(), "Created symlink");
+    }
+
+    Ok(())
+}

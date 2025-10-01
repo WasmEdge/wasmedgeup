@@ -7,7 +7,7 @@ use wasmedgeup::prelude::*;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let ctx = cli.context(Default::default());
+    let ctx = cli.context();
 
     init_tracing(cli.verbose);
 

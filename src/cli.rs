@@ -5,6 +5,7 @@ use crate::commands::install::InstallArgs;
 use crate::commands::list::ListArgs;
 use crate::commands::plugin::PluginCli;
 use crate::commands::remove::RemoveArgs;
+use crate::commands::use_cmd::UseArgs;
 use crate::prelude::*;
 use clap::builder::styling::AnsiColor;
 use clap::{builder::Styles, Parser, Subcommand};
@@ -27,6 +28,16 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, conflicts_with = "quiet")]
     pub verbose: u8,
 
+    /// Connection timeout in seconds for network operations.
+    /// Default: 15 seconds
+    #[arg(long)]
+    pub connect_timeout: Option<u64>,
+
+    /// Request timeout in seconds for network operations.
+    /// Default: 90 seconds
+    #[arg(long)]
+    pub request_timeout: Option<u64>,
+
     /// Disable progress output
     #[arg(short, long, conflicts_with = "verbose")]
     pub quiet: bool,
@@ -42,7 +53,14 @@ pub struct CommandContext {
 }
 
 impl Cli {
-    pub fn context(&self, client: WasmEdgeApiClient) -> CommandContext {
+    pub fn context(&self) -> CommandContext {
+        let mut client = WasmEdgeApiClient::default();
+        if let Some(timeout) = self.connect_timeout {
+            client = client.with_connect_timeout(timeout);
+        }
+        if let Some(timeout) = self.request_timeout {
+            client = client.with_request_timeout(timeout);
+        }
         CommandContext {
             client,
             no_progress: self.quiet,
@@ -58,6 +76,8 @@ pub trait CommandExecutor {
 pub enum Commands {
     /// Install a specified WasmEdge runtime version
     Install(InstallArgs),
+    /// Switch to a specified WasmEdge runtime version
+    Use(UseArgs),
     /// Lists available WasmEdge releases.
     /// By default, only stable releases are shown.
     List(ListArgs),
@@ -74,6 +94,7 @@ impl CommandExecutor for Commands {
         match self {
             List(args) => args.execute(ctx).await,
             Install(args) => args.execute(ctx).await,
+            Use(args) => args.execute(ctx).await,
             _ => todo!(),
         }
     }

@@ -13,7 +13,7 @@ pub mod releases;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 pub use releases::ReleasesFilter;
 
-use reqwest::Response;
+use reqwest::{Client, Response};
 use semver::{Comparator, Prerelease, Version, VersionReq};
 use sha2::{Digest, Sha256};
 use snafu::ResultExt;
@@ -24,8 +24,13 @@ use tokio::{
 };
 use url::Url;
 
-#[derive(Debug, Clone, Default)]
-pub struct WasmEdgeApiClient {}
+#[derive(Debug, Clone)]
+pub struct WasmEdgeApiClient {
+    /// Connection timeout in seconds
+    pub connect_timeout: u64,
+    /// Request timeout in seconds
+    pub request_timeout: u64,
+}
 
 const WASM_EDGE_GIT_URL: &str = "https://github.com/WasmEdge/WasmEdge.git";
 const WASM_EDGE_RELEASE_ASSET_BASE_URL: &str =
@@ -34,6 +39,18 @@ const CHECKSUM_FILE_NAME: &str = "SHA256SUM";
 const BUFFER_SIZE: usize = 8 * 1024; // 8KB
 
 impl WasmEdgeApiClient {
+    fn http_client(&self) -> Client {
+        reqwest::ClientBuilder::new()
+            .connect_timeout(std::time::Duration::from_secs(self.connect_timeout))
+            .timeout(std::time::Duration::from_secs(self.request_timeout))
+            .user_agent(format!(
+                "wasmedgeup/{} (+https://github.com/WasmEdge/wasmedgeup)",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .build()
+            .expect("Failed to build reqwest client")
+    }
+
     pub fn releases(&self, filter: ReleasesFilter, num_releases: usize) -> Result<Vec<Version>> {
         let releases = releases::get_all(WASM_EDGE_GIT_URL, filter)?;
         Ok(releases.into_iter().take(num_releases).collect())
@@ -42,6 +59,14 @@ impl WasmEdgeApiClient {
     pub fn latest_release(&self) -> Result<Version> {
         let releases = releases::get_all(WASM_EDGE_GIT_URL, ReleasesFilter::Stable)?;
         releases.into_iter().next().ok_or(Error::Unknown)
+    }
+
+    pub fn resolve_version(&self, version: &str) -> Result<Version> {
+        if version == "latest" {
+            self.latest_release()
+        } else {
+            Version::parse(version).context(SemVerSnafu {})
+        }
     }
 
     pub async fn download_asset(
@@ -53,7 +78,8 @@ impl WasmEdgeApiClient {
         let url = asset.url()?;
         tracing::debug!(%url, "Starting download for asset");
 
-        let response = reqwest::get(url).await.context(RequestSnafu {
+        let client = self.http_client();
+        let response = client.get(url).send().await.context(RequestSnafu {
             resource: "asset download",
         })?;
 
@@ -76,7 +102,8 @@ impl WasmEdgeApiClient {
 
         tracing::debug!(%url, CHECKSUM_FILE_NAME, "Trying checksum file");
 
-        let response = reqwest::get(url).await.context(RequestSnafu {
+        let client = self.http_client();
+        let response = client.get(url).send().await.context(RequestSnafu {
             resource: "checksums",
         })?;
 
@@ -150,6 +177,31 @@ impl WasmEdgeApiClient {
 
         file.rewind()?;
         Ok(())
+    }
+}
+
+impl WasmEdgeApiClient {
+    pub fn new() -> Self {
+        Self {
+            connect_timeout: 15, // 15 seconds for connection
+            request_timeout: 90, // 90 seconds for request
+        }
+    }
+
+    pub fn with_connect_timeout(mut self, timeout: u64) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    pub fn with_request_timeout(mut self, timeout: u64) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+}
+
+impl Default for WasmEdgeApiClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

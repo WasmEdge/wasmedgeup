@@ -15,9 +15,10 @@
 wasmedgeup should have the following commands:
 
 1. `install`: Installs a specified (or latest) WasmEdge runtime version.
-2. `list`: Lists available WasmEdge releases.
-3. `remove`: Uninstalls a specific version of WasmEdge from the system, removing installed files.
-4. `help`: Shows a usage overview or help message for each subcommand.
+2. `list`: Lists installed WasmEdge versions (or remote releases with `--remote`).
+3. `use`: Switches to a specified WasmEdge runtime version installed on this machine.
+4. `remove`: Uninstalls a specific version of WasmEdge from the system, removing installed files.
+5. `help`: Shows a usage overview or help message for each subcommand.
 
 ##### Command `Install`
 
@@ -47,10 +48,35 @@ wasmedgeup should have the following commands:
 
 ##### Command `List`
 
-Lists available WasmEdge releases. By default, only stable releases are shown.
+Lists installed WasmEdge versions under the target directory. The current active version is marked with `<- current`.
 
+Options
+
+- `-r`, `--remote`
+  - Description: Show remote WasmEdge releases from GitHub instead of installed versions.
+  - Default: off
 - `-a`, `--all`
-  - Description: Include pre-release versions (alpha, beta, rc).
+  - Description: When used with `--remote`, include pre-release versions (alpha, beta, rc).
+  - Default: off
+- `-p`, `--path`
+  - Description: Set the installed location to inspect for local versions
+  - Usage: `--path /usr/local`
+  - Default: `$HOME/.wasmedge`
+
+##### Command `Use`
+
+Switches to a specified WasmEdge runtime version already installed on this machine. This updates the symlinks in the target directory to point to the selected version.
+
+Arguments
+
+1. `use <specific version, e.g. 0.15.0>`: Switches the current version to the specified installed version.
+
+Options
+
+- `-p`, `--path`
+  - Description: Set the installed location
+  - Usage: `--path /usr/local`
+  - Default: `$HOME/.wasmedge`
 
 #### Global Options
 
