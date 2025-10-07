@@ -95,6 +95,7 @@ impl CommandExecutor for Commands {
             List(args) => args.execute(ctx).await,
             Install(args) => args.execute(ctx).await,
             Use(args) => args.execute(ctx).await,
+            Remove(args) => args.execute(ctx).await,
             _ => todo!(),
         }
     }
