@@ -27,7 +27,7 @@ sha2 = "0.10"
 hex = "0.4"
 
 [target.'cfg(unix)'.dependencies]
-flate2 = "1.1.2"
+flate2 = "1.1.4"
 tar = "0.4.44"
 
 [target.'cfg(windows)'.dependencies]
