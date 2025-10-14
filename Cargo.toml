@@ -31,7 +31,7 @@ flate2 = "1.1.4"
 tar = "0.4.44"
 
 [target.'cfg(windows)'.dependencies]
-zip = "5.1.1"
+zip = "6.0.0"
 winreg = "0.55"
 
 [dev-dependencies]
