@@ -2,6 +2,7 @@ use crate::prelude::*;
 
 use dirs::home_dir;
 use snafu::OptionExt;
+use std::fs::{read_to_string, remove_file, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -36,6 +37,49 @@ pub fn setup_path(install_dir: &Path) -> Result<()> {
             }
 
             append_file(&rc, line_to_write)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_path(install_dir: &Path) -> Result<()> {
+    for shell in get_available_shells() {
+        let source_line = shell.source_line(install_dir);
+        for rc in shell.effective_rc_files() {
+            if !rc.exists() {
+                continue;
+            }
+
+            let Ok(original) = read_to_string(&rc) else {
+                continue;
+            };
+            let mut changed = false;
+            let mut out = String::with_capacity(original.len());
+
+            for line in original.lines() {
+                if line == source_line {
+                    changed = true;
+                    continue;
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+
+            if changed {
+                if let Ok(mut file) = OpenOptions::new().write(true).truncate(true).open(&rc) {
+                    let _ = file.write_all(out.as_bytes());
+                    let _ = file.sync_data();
+                }
+            }
+        }
+    }
+
+    for shell in get_available_shells() {
+        let script = shell.env_script();
+        let path = install_dir.join(script.name);
+        if path.exists() {
+            let _ = remove_file(path);
         }
     }
 
@@ -188,12 +232,21 @@ impl UnixShell for Zsh {
     }
 
     fn effective_rc_files(&self) -> Vec<PathBuf> {
-        self.potential_rc_paths()
-            .into_iter()
+        let candidates = self.potential_rc_paths();
+
+        // Prefer all existing rc files so we update/remove entries everywhere.
+        let existing: Vec<PathBuf> = candidates
+            .iter()
             .filter(|rc| rc.is_file())
-            .chain(self.potential_rc_paths())
-            .take(1)
-            .collect()
+            .cloned()
+            .collect();
+
+        if !existing.is_empty() {
+            return existing;
+        }
+
+        // If none exist, fall back to the first potential path (to create on install).
+        candidates.into_iter().take(1).collect()
     }
 }
 
