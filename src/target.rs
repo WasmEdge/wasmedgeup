@@ -1,6 +1,7 @@
 use clap::ValueEnum;
+use serde::Serialize;
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
 pub enum TargetOS {
     Linux,
     Ubuntu,
@@ -65,7 +66,7 @@ fn get_ubuntu_version() -> Option<(u32, u32)> {
     None
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
 pub enum TargetArch {
     /// aliases: [x86_64, amd64]
     #[value(name = "x86_64", alias("amd64"))]
