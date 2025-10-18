@@ -1,6 +1,7 @@
 use clap::ValueEnum;
+use serde::Serialize;
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
 pub enum TargetOS {
     Linux,
     Ubuntu,
@@ -65,27 +66,15 @@ fn get_ubuntu_version() -> Option<(u32, u32)> {
     None
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize, Default)]
 pub enum TargetArch {
     /// aliases: [x86_64, amd64]
     #[value(name = "x86_64", alias("amd64"))]
+    #[cfg_attr(target_arch = "x86_64", default)]
     X86_64,
 
     /// aliases: [aarch64, arm64]
     #[value(alias("arm64"))]
+    #[cfg_attr(target_arch = "aarch64", default)]
     Aarch64,
-}
-
-impl Default for TargetArch {
-    fn default() -> Self {
-        cfg_if::cfg_if! {
-            if #[cfg(target_arch = "x86_64")] {
-                Self::X86_64
-            } else if #[cfg(target_arch = "aarch64")] {
-                Self::Aarch64
-            } else {
-                compile_error!("Unsupported target architecture: {}", std::env::consts::ARCH);
-            }
-        }
-    }
 }

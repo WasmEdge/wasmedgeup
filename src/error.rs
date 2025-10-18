@@ -68,6 +68,14 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    #[snafu(display("Unsupported platform: os={os} arch={arch}"))]
+    UnsupportedPlatform { os: String, arch: String },
+
+    #[snafu(display(
+        "WasmEdge runtime not found on PATH; please install WasmEdge or ensure PATH is set"
+    ))]
+    RuntimeNotFound,
+
     #[default]
     #[snafu(display("Unknown error occurred"))]
     Unknown,
