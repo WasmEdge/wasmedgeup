@@ -28,7 +28,7 @@ serial_test = "3.2.0"
 hex = "0.4"
 
 [target.'cfg(unix)'.dependencies]
-flate2 = "1.1.4"
+flate2 = "1.1.5"
 tar = "0.4.44"
 
 [target.'cfg(windows)'.dependencies]
