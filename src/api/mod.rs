@@ -365,3 +365,9 @@ pub fn latest_installed_version(versions_dir: &Path) -> Result<Option<Version>> 
     versions.sort_by(|a, b| b.cmp(a));
     Ok(versions.into_iter().next())
 }
+
+pub fn runtime_ge_015(runtime: &str) -> bool {
+    semver::Version::parse(runtime)
+        .map(|v| v >= semver::Version::new(0, 15, 0))
+        .unwrap_or(true)
+}
