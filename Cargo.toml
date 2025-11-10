@@ -39,7 +39,7 @@ tar = "0.4.44"
 [target.'cfg(windows)'.dependencies]
 zip = "6.0.0"
 winreg = "0.55"
-nvml-wrapper = "0.9"
+nvml-wrapper = "0.11"
 wmi = "0.12"
 
 [target.'cfg(windows)'.dependencies.opencl3]
