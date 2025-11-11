@@ -6,6 +6,11 @@ if not contains "{WASMEDGE_BIN_DIR}" $PATH
     set -gx PATH "{WASMEDGE_BIN_DIR}" $PATH
 end
 
+# Configure WasmEdge plugins
+if not set -q WASMEDGE_PLUGIN_PATH
+    set -gx WASMEDGE_PLUGIN_PATH "{WASMEDGE_PLUGIN_DIR}"
+end
+
 # Handle library paths for different platforms
 switch (uname)
     case Linux

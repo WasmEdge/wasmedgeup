@@ -2,7 +2,7 @@ use crate::api::runtime_ge_015;
 use crate::cli::{CommandContext, CommandExecutor};
 use crate::prelude::*;
 use crate::system;
-use crate::system::plugins::platform_key_from_specs;
+use crate::system::plugins::plugin_platform_key;
 use clap::Args;
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -38,13 +38,6 @@ pub struct PluginListArgs {
 impl CommandExecutor for PluginListArgs {
     async fn execute(self, _ctx: CommandContext) -> Result<()> {
         let spec = system::detect();
-        let platform = match platform_key_from_specs(&spec.os) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("{e}");
-                return Err(e);
-            }
-        };
 
         let runtime = if let Some(r) = self.runtime {
             r
@@ -55,6 +48,20 @@ impl CommandExecutor for PluginListArgs {
                     eprintln!("WasmEdge runtime not found: {e}. Install a runtime first (e.g., wasmedgeup install 0.15.0).");
                     return Err(Error::RuntimeNotFound);
                 }
+            }
+        };
+
+        let platform = match semver::Version::parse(&runtime) {
+            Ok(v) => match plugin_platform_key(&spec.os, &v) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return Err(e);
+                }
+            },
+            Err(e) => {
+                eprintln!("Invalid runtime version '{runtime}' (expected semver like 0.15.0)");
+                return Err(Error::SemVer { source: e });
             }
         };
 

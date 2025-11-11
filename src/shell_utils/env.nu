@@ -11,3 +11,8 @@ if (uname) == "Linux" {
 } else if (uname) == "Darwin" {
     path add "{WASMEDGE_LIB_DIR}" DYLD_LIBRARY_PATH
 }
+
+# Configure WasmEdge plugins
+if ($env | get WASMEDGE_PLUGIN_PATH? | is-empty) {
+    $env.WASMEDGE_PLUGIN_PATH = "{WASMEDGE_PLUGIN_DIR}"
+}
