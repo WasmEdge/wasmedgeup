@@ -129,11 +129,13 @@ pub trait UnixShell: Send + Sync {
     fn write_script(&self, script: &ShellScript, install_dir: &Path) -> Result<()> {
         let wasmedge_bin = format!("{}/bin", install_dir.to_string_lossy());
         let wasmedge_lib = format!("{}/{}", install_dir.to_string_lossy(), LIB_DIR);
+        let wasmedge_plugin = format!("{}/plugin", install_dir.to_string_lossy());
         let env_path = install_dir.join(script.name);
         let env_content = script
             .template
             .replace("{WASMEDGE_BIN_DIR}", &wasmedge_bin)
-            .replace("{WASMEDGE_LIB_DIR}", &wasmedge_lib);
+            .replace("{WASMEDGE_LIB_DIR}", &wasmedge_lib)
+            .replace("{WASMEDGE_PLUGIN_DIR}", &wasmedge_plugin);
 
         let mut file = std::fs::OpenOptions::new()
             .write(true)
