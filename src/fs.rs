@@ -235,7 +235,7 @@ fn extract_zip(file: &mut std::fs::File, to: &Path) -> Result<()> {
 ///
 /// Returns an error if creating or updating symlinks fails.
 pub async fn create_version_symlinks(base_dir: &Path, version: &str) -> Result<()> {
-    let symlink_dirs = ["bin", "include", "lib"];
+    let symlink_dirs = ["bin", "include", "lib", "plugin"];
 
     for dir in symlink_dirs {
         let symlink_path = base_dir.join(dir);

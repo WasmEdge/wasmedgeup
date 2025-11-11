@@ -1,8 +1,7 @@
-use wasmedgeup::system;
 use wasmedgeup::system::cpu::{classify, parse_flags};
-use wasmedgeup::system::plugins::platform_key_from_specs;
-use wasmedgeup::system::spec::{CpuClass, CpuFeature};
-use wasmedgeup::target::TargetArch;
+use wasmedgeup::system::plugins::{platform_key_from_specs, plugin_platform_key};
+use wasmedgeup::system::{self, CpuClass, CpuFeature, LibcKind, LibcSpec, OsSpec};
+use wasmedgeup::target::{TargetArch, TargetOS};
 
 #[test]
 fn test_platform_key_detect_non_empty() {
@@ -84,4 +83,56 @@ fn test_cpu_classify_direct_arm() {
         CpuClass::Sve2 | CpuClass::Sve | CpuClass::Neon | CpuClass::NeonOnly => {}
         other => panic!("unexpected ARM class for given flags: {:?}", other),
     }
+}
+
+#[test]
+fn test_plugin_platform_key_linux_manylinux_switch() {
+    let os = OsSpec {
+        os_type: TargetOS::Linux,
+        arch: TargetArch::X86_64,
+        distro: Some("ubuntu".to_string()),
+        version: Some("22.04".to_string()),
+        kernel: Some("6.4.0".to_string()),
+        libc: LibcSpec {
+            kind: LibcKind::Glibc,
+            version: Some("2.35".to_string()),
+        },
+    };
+
+    let v014 = semver::Version::parse("0.14.0").unwrap();
+    let v015 = semver::Version::parse("0.15.0").unwrap();
+
+    let key_014 = plugin_platform_key(&os, &v014).expect("key for 0.14.x");
+    let key_015 = plugin_platform_key(&os, &v015).expect("key for 0.15.x");
+
+    assert_eq!(key_014, "manylinux2014_x86_64");
+    assert_eq!(key_015, "manylinux_2_28_x86_64");
+}
+
+#[test]
+fn test_plugin_platform_key_darwin_major() {
+    let mut os = OsSpec {
+        os_type: TargetOS::Darwin,
+        arch: TargetArch::Aarch64,
+        distro: None,
+        version: Some("23.4.0".to_string()),
+        kernel: None,
+        libc: LibcSpec {
+            kind: LibcKind::Glibc,
+            version: None,
+        },
+    };
+
+    let v = semver::Version::parse("0.15.0").unwrap();
+    let key_arm = plugin_platform_key(&os, &v).expect("darwin arm64 key");
+    assert_eq!(key_arm, "darwin_23-arm64");
+
+    os.arch = TargetArch::X86_64;
+    let key_x64 = plugin_platform_key(&os, &v).expect("darwin x86_64 key");
+    assert_eq!(key_x64, "darwin_23-x86_64");
+
+    // Fallback when no version present
+    os.version = None;
+    let key_fallback = plugin_platform_key(&os, &v).expect("darwin generic key");
+    assert_eq!(key_fallback, "darwin_x86_64");
 }

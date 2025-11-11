@@ -80,6 +80,9 @@ pub enum Error {
     #[snafu(display("Unknown error occurred"))]
     Unknown,
 
+    #[snafu(display("No plugins specified for installation"))]
+    NoPluginsSpecified,
+
     #[cfg(windows)]
     #[snafu(display("Error: Cannot create symbolic links.\n\nTo enable symlink creation on Windows:\n  1. Run as Administrator, or\n  2. Enable Developer Mode:\n     - Open Windows Settings\n     - Update & Security > For developers\n     - Enable 'Developer Mode'\n"))]
     WindowsSymlinkError { version: String },

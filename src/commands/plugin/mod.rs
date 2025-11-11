@@ -1,8 +1,8 @@
-mod install;
+pub mod install;
 pub mod list;
 mod remove;
 mod specs;
-mod version;
+pub mod version;
 
 use crate::cli::{CommandContext, CommandExecutor};
 use crate::prelude::*;
@@ -33,6 +33,7 @@ pub enum PluginCommands {
 impl CommandExecutor for PluginCli {
     async fn execute(self, ctx: CommandContext) -> Result<()> {
         match self.commands {
+            PluginCommands::Install(args) => args.execute(ctx).await,
             PluginCommands::List(args) => args.execute(ctx).await,
             PluginCommands::Specs(args) => args.execute(ctx).await,
             _ => Err(Error::Unknown),

@@ -23,3 +23,9 @@ case $(uname) in
         export DYLD_LIBRARY_PATH="{WASMEDGE_LIB_DIR}:${DYLD_LIBRARY_PATH}"
         ;;
 esac
+
+# Configure WasmEdge plugins
+: "${WASMEDGE_PLUGIN_PATH}"
+if [ -z "${WASMEDGE_PLUGIN_PATH}" ]; then
+    export WASMEDGE_PLUGIN_PATH="{WASMEDGE_PLUGIN_DIR}"
+fi
