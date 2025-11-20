@@ -43,7 +43,7 @@ nvml-wrapper = "0.11"
 wmi = "0.12"
 
 [target.'cfg(windows)'.dependencies.opencl3]
-version = "0.9"
+version = "0.12"
 optional = true
 
 [features]
