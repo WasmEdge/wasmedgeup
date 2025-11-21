@@ -16,14 +16,6 @@ fn default_tmpdir() -> PathBuf {
     std::env::temp_dir()
 }
 
-fn get_system_install_info() -> (String, String) {
-    if cfg!(windows) {
-        ("C:\\Program Files\\WasmEdge".to_string(), "".to_string())
-    } else {
-        ("/usr/local".to_string(), "sudo ".to_string())
-    }
-}
-
 #[derive(Debug, Parser)]
 pub struct InstallArgs {
     /// WasmEdge version to install, e.g. `latest`, `0.14.1`, `0.14.1-rc.1`, etc.
@@ -129,44 +121,35 @@ impl CommandExecutor for InstallArgs {
         let target_dir = self.path.unwrap_or_else(default_path);
 
         if target_dir.exists() {
-            if !crate::fs::can_write_to_directory(&target_dir) {
-                tracing::debug!(path = %target_dir.display(), "Installation requires elevated permissions");
-                let (system_dir, sudo) = get_system_install_info();
-                return Err(Error::InsufficientPermissions {
-                    path: target_dir.display().to_string(),
-                    action: "write to target directory".to_string(),
-                    version: version.to_string(),
-                    system_dir,
-                    sudo,
-                });
+            if crate::fs::can_write_to_directory(&target_dir) {
+                tracing::debug!(target_dir = %target_dir.display(), "Verified write permissions");
+            } else {
+                return Err(crate::commands::insufficient_permissions(
+                    &target_dir,
+                    "write to target directory",
+                    &version.to_string(),
+                ));
             }
-            tracing::debug!(target_dir = %target_dir.display(), "Verified write permissions");
         } else {
             match fs::create_dir_all(&target_dir).await {
                 Ok(_) => {
                     if !crate::fs::can_write_to_directory(&target_dir) {
                         tracing::debug!(path = %target_dir.display(), "Created directory but cannot write to it");
-                        let (system_dir, sudo) = get_system_install_info();
-                        return Err(Error::InsufficientPermissions {
-                            path: target_dir.display().to_string(),
-                            action: "write to target directory".to_string(),
-                            version: version.to_string(),
-                            system_dir,
-                            sudo,
-                        });
+                        return Err(crate::commands::insufficient_permissions(
+                            &target_dir,
+                            "write to target directory",
+                            &version.to_string(),
+                        ));
                     }
                     tracing::debug!(target_dir = %target_dir.display(), "Created target directory");
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, path = %target_dir.display(), "Failed to create directory");
-                    let (system_dir, sudo) = get_system_install_info();
-                    return Err(Error::InsufficientPermissions {
-                        path: target_dir.display().to_string(),
-                        action: "create directory".to_string(),
-                        version: version.to_string(),
-                        system_dir,
-                        sudo,
-                    });
+                    return Err(crate::commands::insufficient_permissions(
+                        &target_dir,
+                        "create directory",
+                        &version.to_string(),
+                    ));
                 }
             }
         }
