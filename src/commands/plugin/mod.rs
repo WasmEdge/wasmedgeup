@@ -1,6 +1,6 @@
 pub mod install;
 pub mod list;
-mod remove;
+pub mod remove;
 mod specs;
 pub mod version;
 
@@ -35,8 +35,8 @@ impl CommandExecutor for PluginCli {
         match self.commands {
             PluginCommands::Install(args) => args.execute(ctx).await,
             PluginCommands::List(args) => args.execute(ctx).await,
+            PluginCommands::Remove(args) => args.execute(ctx).await,
             PluginCommands::Specs(args) => args.execute(ctx).await,
-            _ => Err(Error::Unknown),
         }
     }
 }
