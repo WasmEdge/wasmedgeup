@@ -183,7 +183,10 @@ impl CommandExecutor for PluginInstallArgs {
     }
 }
 
-fn select_runtime_version(versions_dir: &Path, requested: Option<&str>) -> Result<semver::Version> {
+pub(super) fn select_runtime_version(
+    versions_dir: &Path,
+    requested: Option<&str>,
+) -> Result<semver::Version> {
     if let Some(ver) = requested {
         return semver::Version::parse(ver).map_err(|source| Error::SemVer { source });
     }

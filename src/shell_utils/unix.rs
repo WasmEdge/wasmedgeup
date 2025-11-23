@@ -200,21 +200,8 @@ pub struct Zsh;
 
 impl Zsh {
     fn zdotdir() -> Result<PathBuf> {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        if matches!(std::env::var("SHELL"), Ok(sh) if sh.ends_with("/zsh")) {
-            return match std::env::var("ZDOTDIR") {
-                Ok(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
-                _ => Err(Error::Unknown),
-            };
-        }
-
-        match std::process::Command::new("zsh")
-            .args(["-c", "echo -n $ZDOTDIR"])
-            .output()
-        {
-            Ok(io) if !io.stdout.is_empty() => Ok(PathBuf::from(OsStr::from_bytes(&io.stdout))),
+        match std::env::var("ZDOTDIR") {
+            Ok(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
             _ => Err(Error::Unknown),
         }
     }
@@ -227,7 +214,8 @@ impl UnixShell for Zsh {
     }
 
     fn potential_rc_paths(&self) -> Vec<PathBuf> {
-        [Zsh::zdotdir().ok(), home_dir()]
+        let home_env = std::env::var("HOME").ok().map(PathBuf::from);
+        [Zsh::zdotdir().ok(), home_env]
             .iter()
             .filter_map(|dir| dir.as_ref().map(|p| p.join(".zshenv")))
             .collect()
