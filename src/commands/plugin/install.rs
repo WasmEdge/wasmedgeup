@@ -14,6 +14,7 @@ use crate::{
     system,
 };
 
+use super::utils::find_plugin_shared_objects;
 use super::version::PluginVersion;
 
 const GH_RELEASE_DOWNLOAD_BASE: &str = "https://github.com/WasmEdge/WasmEdge/releases/download";
@@ -139,23 +140,23 @@ impl CommandExecutor for PluginInstallArgs {
                 })?;
             wfs::extract_archive(&mut file, &workspace).await?;
 
-            let found_any = match find_plugin_shared_objects(&workspace) {
-                Ok(paths) if !paths.is_empty() => {
-                    for src in paths {
-                        let file_name = src.file_name().unwrap_or_default();
-                        let dest = dest_plugin.join(file_name);
-                        if let Some(parent) = dest.parent() {
-                            let _ = fs::create_dir_all(parent).await;
-                        }
-                        if let Err(e) = fs::copy(&src, &dest).await {
-                            tracing::warn!(error = %e, from = %src.display(), to = %dest.display(), "Failed to copy plugin shared object");
-                        } else {
-                            tracing::debug!(from = %src.display(), to = %dest.display(), "Copied plugin shared object");
-                        }
+            let paths = find_plugin_shared_objects(&workspace);
+            let found_any = if !paths.is_empty() {
+                for src in paths {
+                    let file_name = src.file_name().unwrap_or_default();
+                    let dest = dest_plugin.join(file_name);
+                    if let Some(parent) = dest.parent() {
+                        let _ = fs::create_dir_all(parent).await;
                     }
-                    true
+                    if let Err(e) = fs::copy(&src, &dest).await {
+                        tracing::warn!(error = %e, from = %src.display(), to = %dest.display(), "Failed to copy plugin shared object");
+                    } else {
+                        tracing::debug!(from = %src.display(), to = %dest.display(), "Copied plugin shared object");
+                    }
                 }
-                _ => false,
+                true
+            } else {
+                false
             };
 
             if !found_any {
@@ -235,51 +236,4 @@ async fn download_with_progress(ctx: &CommandContext, url: &str, to: &Path) -> R
         .await?;
     file.write_all(&bytes).await?;
     Ok(())
-}
-
-/// Recursively scans an extracted plugin archive to find plugin shared objects.
-///
-/// Patterns per platform:
-/// - Linux: files matching `libwasmedgePlugin*.so`
-/// - macOS: files matching `libwasmedgePlugin*.dylib`
-/// - Windows: files matching `wasmedgePlugin*.dll`
-///
-/// Notes:
-/// - Ignores the `__MACOSX` metadata directory
-/// - Returns a list of absolute paths to matching files.
-fn find_plugin_shared_objects(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut results = Vec::new();
-    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-            if name == "__MACOSX" {
-                continue;
-            }
-        }
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        #[cfg(target_os = "linux")]
-        {
-            if fname.starts_with("libwasmedgePlugin") && fname.ends_with(".so") {
-                results.push(path.to_path_buf());
-            }
-        }
-        #[cfg(target_os = "macos")]
-        {
-            if fname.starts_with("libwasmedgePlugin") && fname.ends_with(".dylib") {
-                results.push(path.to_path_buf());
-            }
-        }
-        #[cfg(target_os = "windows")]
-        {
-            if fname.starts_with("wasmedgePlugin") && fname.ends_with(".dll") {
-                results.push(path.to_path_buf());
-            }
-        }
-    }
-    Ok(results)
 }

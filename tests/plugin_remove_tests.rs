@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use wasmedgeup::{
     api::WasmEdgeApiClient,
     cli::{CommandContext, CommandExecutor},
-    commands::plugin::remove::{extract_plugin_name, PluginRemoveArgs},
+    commands::plugin::{remove::PluginRemoveArgs, utils::extract_plugin_name},
 };
 
 mod test_utils;
