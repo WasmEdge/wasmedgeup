@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::{
+    http::HttpClientConfig,
     prelude::*,
     target::{TargetArch, TargetOS},
 };
@@ -40,17 +41,10 @@ const BUFFER_SIZE: usize = 8 * 1024; // 8KB
 
 impl WasmEdgeApiClient {
     fn http_client(&self) -> Result<Client> {
-        reqwest::ClientBuilder::new()
-            .connect_timeout(std::time::Duration::from_secs(self.connect_timeout))
-            .timeout(std::time::Duration::from_secs(self.request_timeout))
-            .user_agent(format!(
-                "wasmedgeup/{} (+https://github.com/WasmEdge/wasmedgeup)",
-                env!("CARGO_PKG_VERSION")
-            ))
+        HttpClientConfig::new()
+            .with_connect_timeout(self.connect_timeout)
+            .with_request_timeout(self.request_timeout)
             .build()
-            .map_err(|e| Error::HttpClientBuild {
-                reason: e.to_string(),
-            })
     }
 
     pub fn releases(&self, filter: ReleasesFilter, num_releases: usize) -> Result<Vec<Version>> {
