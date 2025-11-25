@@ -9,7 +9,9 @@ use crate::{
     cli::{CommandContext, CommandExecutor},
     commands::default_path,
     error::{Error, Result},
-    fs as wfs, system,
+    fs as wfs,
+    http::HttpClientConfig,
+    system,
 };
 
 use super::version::PluginVersion;
@@ -201,17 +203,10 @@ pub(super) fn select_runtime_version(
 async fn download_with_progress(ctx: &CommandContext, url: &str, to: &Path) -> Result<()> {
     use tokio::io::AsyncWriteExt as _;
 
-    let client = reqwest::ClientBuilder::new()
-        .connect_timeout(std::time::Duration::from_secs(ctx.client.connect_timeout))
-        .timeout(std::time::Duration::from_secs(ctx.client.request_timeout))
-        .user_agent(format!(
-            "wasmedgeup/{} (+https://github.com/WasmEdge/wasmedgeup)",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()
-        .map_err(|e| Error::HttpClientBuild {
-            reason: e.to_string(),
-        })?;
+    let client = HttpClientConfig::new()
+        .with_connect_timeout(ctx.client.connect_timeout)
+        .with_request_timeout(ctx.client.request_timeout)
+        .build()?;
 
     let resp = client
         .get(url)
