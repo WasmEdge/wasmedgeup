@@ -6,6 +6,24 @@ use std::fs::{read_to_string, remove_file, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Get XDG config path with fallback to ~/.config.
+///
+/// Returns the path constructed by joining $XDG_CONFIG_HOME (or ~/.config if unset)
+/// with the provided subpath components.
+fn xdg_config_path(subpath: &[&str]) -> Option<PathBuf> {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|h| h.join(".config")))?;
+
+    let mut path = base;
+    for component in subpath {
+        path.push(component);
+    }
+    Some(path)
+}
+
 pub fn setup_path(install_dir: &Path) -> Result<()> {
     use std::fs::read_to_string;
 
@@ -258,18 +276,9 @@ impl UnixShell for Fish {
     // > "$XDG_CONFIG_HOME/fish/conf.d" (or "~/.config/fish/conf.d" if that variable is unset) for the user
     // from <https://github.com/fish-shell/fish-shell/issues/3170#issuecomment-228311857>
     fn potential_rc_paths(&self) -> Vec<PathBuf> {
-        let xdg_rc_path = std::env::var("XDG_CONFIG_HOME").ok().map(|p| {
-            let mut p = PathBuf::from(p);
-            p.extend(["fish", "conf.d", "wasmedgeup.fish"]);
-            p
-        });
-
-        let home_rc_path = home_dir().map(|mut p| {
-            p.extend([".config", "fish", "conf.d", "wasmedgeup.fish"]);
-            p
-        });
-
-        xdg_rc_path.into_iter().chain(home_rc_path).collect()
+        xdg_config_path(&["fish", "conf.d", "wasmedgeup.fish"])
+            .into_iter()
+            .collect()
     }
 
     fn effective_rc_files(&self) -> Vec<PathBuf> {
@@ -302,18 +311,9 @@ impl UnixShell for Nushell {
     }
 
     fn potential_rc_paths(&self) -> Vec<PathBuf> {
-        let xdg_rc_path = std::env::var("XDG_CONFIG_HOME").ok().map(|p| {
-            let mut p = PathBuf::from(p);
-            p.extend(["nushell", "config.nu"]);
-            p
-        });
-
-        let home_rc_path = home_dir().map(|mut p| {
-            p.extend([".config", "nushell", "config.nu"]);
-            p
-        });
-
-        xdg_rc_path.into_iter().chain(home_rc_path).collect()
+        xdg_config_path(&["nushell", "config.nu"])
+            .into_iter()
+            .collect()
     }
 
     fn effective_rc_files(&self) -> Vec<PathBuf> {
