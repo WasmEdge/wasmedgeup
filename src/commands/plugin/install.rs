@@ -146,7 +146,9 @@ impl CommandExecutor for PluginInstallArgs {
                     let file_name = src.file_name().unwrap_or_default();
                     let dest = dest_plugin.join(file_name);
                     if let Some(parent) = dest.parent() {
-                        let _ = fs::create_dir_all(parent).await;
+                        if let Err(e) = fs::create_dir_all(parent).await {
+                            tracing::warn!(error = %e, path = %parent.display(), "Failed to create parent directory for plugin");
+                        }
                     }
                     if let Err(e) = fs::copy(&src, &dest).await {
                         tracing::warn!(error = %e, from = %src.display(), to = %dest.display(), "Failed to copy plugin shared object");

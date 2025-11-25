@@ -68,8 +68,12 @@ pub fn uninstall_path(install_dir: &Path) -> Result<()> {
 
             if changed {
                 if let Ok(mut file) = OpenOptions::new().write(true).truncate(true).open(&rc) {
-                    let _ = file.write_all(out.as_bytes());
-                    let _ = file.sync_data();
+                    if let Err(e) = file.write_all(out.as_bytes()) {
+                        tracing::warn!(error = %e, path = %rc.display(), "Failed to update shell rc file");
+                    }
+                    if let Err(e) = file.sync_data() {
+                        tracing::warn!(error = %e, path = %rc.display(), "Failed to sync shell rc file");
+                    }
                 }
             }
         }
@@ -79,7 +83,9 @@ pub fn uninstall_path(install_dir: &Path) -> Result<()> {
         let script = shell.env_script();
         let path = install_dir.join(script.name);
         if path.exists() {
-            let _ = remove_file(path);
+            if let Err(e) = remove_file(&path) {
+                tracing::debug!(error = %e, path = %path.display(), "Failed to remove env script");
+            }
         }
     }
 
