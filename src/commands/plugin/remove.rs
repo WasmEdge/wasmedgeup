@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::Args;
 
 use super::install::select_runtime_version;
+use super::utils::extract_plugin_name;
 use super::version::PluginVersion;
 use crate::commands::default_path;
 use crate::{
@@ -172,30 +173,5 @@ impl CommandExecutor for PluginRemoveArgs {
         }
 
         Ok(())
-    }
-}
-
-pub fn extract_plugin_name(path: &Path) -> Option<String> {
-    let fname = path.file_name()?.to_str()?;
-    #[cfg(target_os = "linux")]
-    {
-        fname
-            .strip_prefix("libwasmedgePlugin")
-            .and_then(|rest| rest.strip_suffix(".so"))
-            .map(|core| core.to_string())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        fname
-            .strip_prefix("libwasmedgePlugin")
-            .and_then(|rest| rest.strip_suffix(".dylib"))
-            .map(|core| core.to_string())
-    }
-    #[cfg(target_os = "windows")]
-    {
-        fname
-            .strip_prefix("wasmedgePlugin")
-            .and_then(|rest| rest.strip_suffix(".dll"))
-            .map(|core| core.to_string())
     }
 }

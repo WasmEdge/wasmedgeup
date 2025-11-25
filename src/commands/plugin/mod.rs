@@ -2,6 +2,7 @@ pub mod install;
 pub mod list;
 pub mod remove;
 mod specs;
+pub mod utils;
 pub mod version;
 
 use crate::cli::{CommandContext, CommandExecutor};
