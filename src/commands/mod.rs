@@ -1,4 +1,4 @@
-use crate::error::Error;
+use crate::prelude::*;
 use std::path::{Path, PathBuf};
 
 pub mod install;
@@ -7,9 +7,9 @@ pub mod plugin;
 pub mod remove;
 pub mod use_cmd;
 
-fn default_path() -> PathBuf {
-    let home_dir = dirs::home_dir().expect("home_dir should be present");
-    home_dir.join(".wasmedge")
+fn default_path() -> Result<PathBuf> {
+    let home_dir = dirs::home_dir().ok_or(Error::HomeDirNotFound)?;
+    Ok(home_dir.join(".wasmedge"))
 }
 
 pub fn insufficient_permissions(path: &Path, action: &str, version: &str) -> Error {

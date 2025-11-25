@@ -40,11 +40,11 @@ impl CommandExecutor for PluginRemoveArgs {
             return Err(Error::NoPluginsSpecified);
         }
 
-        let versions_dir = self
-            .path
-            .clone()
-            .unwrap_or_else(default_path)
-            .join("versions");
+        let versions_dir = match self.path.clone() {
+            Some(p) => p,
+            None => default_path()?,
+        }
+        .join("versions");
 
         let runtime_version = select_runtime_version(&versions_dir, self.runtime.as_deref())?;
         let version_dir = versions_dir.join(runtime_version.to_string());

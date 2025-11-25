@@ -11,6 +11,7 @@ pub enum TargetOS {
     Windows,
 }
 
+#[allow(clippy::derivable_impls)] // Not derivable: contains platform-specific logic on Linux
 impl Default for TargetOS {
     fn default() -> Self {
         cfg_if::cfg_if! {
@@ -31,6 +32,7 @@ impl Default for TargetOS {
     }
 }
 
+#[cfg(target_os = "linux")]
 macro_rules! unwrap_or_continue {
     ($expr:expr, $variant:ident) => {
         match $expr {

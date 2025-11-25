@@ -28,7 +28,10 @@ impl CommandExecutor for UseArgs {
         )?;
         tracing::debug!(%version, "Resolved version for use");
 
-        let target_dir = self.path.unwrap_or_else(default_path);
+        let target_dir = match self.path {
+            Some(p) => p,
+            None => default_path()?,
+        };
 
         let version_dir = target_dir.join("versions").join(version.to_string());
         if !version_dir.exists() {
