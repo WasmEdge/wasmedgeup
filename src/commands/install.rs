@@ -118,7 +118,10 @@ impl CommandExecutor for InstallArgs {
             .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to extract asset"))?;
         tracing::debug!(dest = %tmpdir.display(), "Extraction completed successfully");
 
-        let target_dir = self.path.unwrap_or_else(default_path);
+        let target_dir = match self.path {
+            Some(p) => p,
+            None => default_path()?,
+        };
 
         if target_dir.exists() {
             if crate::fs::can_write_to_directory(&target_dir) {

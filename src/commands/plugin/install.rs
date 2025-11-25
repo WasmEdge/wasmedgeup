@@ -70,11 +70,11 @@ impl CommandExecutor for PluginInstallArgs {
             return Err(Error::NoPluginsSpecified);
         }
 
-        let versions_dir = self
-            .path
-            .clone()
-            .unwrap_or_else(default_path)
-            .join("versions");
+        let versions_dir = match self.path.clone() {
+            Some(p) => p,
+            None => default_path()?,
+        }
+        .join("versions");
         let runtime_version = select_runtime_version(&versions_dir, self.runtime.as_deref())?;
         let version_dir = versions_dir.join(runtime_version.to_string());
 
@@ -209,7 +209,9 @@ async fn download_with_progress(ctx: &CommandContext, url: &str, to: &Path) -> R
             env!("CARGO_PKG_VERSION")
         ))
         .build()
-        .expect("Failed to build reqwest client");
+        .map_err(|e| Error::HttpClientBuild {
+            reason: e.to_string(),
+        })?;
 
     let resp = client
         .get(url)

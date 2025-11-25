@@ -30,7 +30,10 @@ pub struct RemoveArgs {
 
 impl CommandExecutor for RemoveArgs {
     async fn execute(self, ctx: CommandContext) -> Result<()> {
-        let target_dir = self.path.unwrap_or_else(default_path);
+        let target_dir = match self.path {
+            Some(p) => p,
+            None => default_path()?,
+        };
         let versions_dir = target_dir.join("versions");
 
         if !versions_dir.exists() {

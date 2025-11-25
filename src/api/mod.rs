@@ -39,7 +39,7 @@ const CHECKSUM_FILE_NAME: &str = "SHA256SUM";
 const BUFFER_SIZE: usize = 8 * 1024; // 8KB
 
 impl WasmEdgeApiClient {
-    fn http_client(&self) -> Client {
+    fn http_client(&self) -> Result<Client> {
         reqwest::ClientBuilder::new()
             .connect_timeout(std::time::Duration::from_secs(self.connect_timeout))
             .timeout(std::time::Duration::from_secs(self.request_timeout))
@@ -48,7 +48,9 @@ impl WasmEdgeApiClient {
                 env!("CARGO_PKG_VERSION")
             ))
             .build()
-            .expect("Failed to build reqwest client")
+            .map_err(|e| Error::HttpClientBuild {
+                reason: e.to_string(),
+            })
     }
 
     pub fn releases(&self, filter: ReleasesFilter, num_releases: usize) -> Result<Vec<Version>> {
@@ -78,7 +80,7 @@ impl WasmEdgeApiClient {
         let url = asset.url()?;
         tracing::debug!(%url, "Starting download for asset");
 
-        let client = self.http_client();
+        let client = self.http_client()?;
         let response = client.get(url).send().await.context(RequestSnafu {
             resource: "asset download",
         })?;
@@ -102,7 +104,7 @@ impl WasmEdgeApiClient {
 
         tracing::debug!(%url, CHECKSUM_FILE_NAME, "Trying checksum file");
 
-        let client = self.http_client();
+        let client = self.http_client()?;
         let response = client.get(url).send().await.context(RequestSnafu {
             resource: "checksums",
         })?;
@@ -337,10 +339,16 @@ fn is_arm_ubuntu_supported(version: &Version) -> bool {
 
 fn download_progress_bar(size: u64) -> ProgressBar {
     let pb = ProgressBar::new(size);
-    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-        .unwrap()
-        .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
-        .progress_chars("#>-"));
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+        )
+        .expect("progress bar template is valid")
+        .with_key("eta", |state: &ProgressState, w: &mut dyn Write| {
+            let _ = write!(w, "{:.1}s", state.eta().as_secs_f64());
+        })
+        .progress_chars("#>-"),
+    );
 
     pb
 }

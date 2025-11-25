@@ -89,6 +89,14 @@ pub enum Error {
 
     #[snafu(display("Invalid archive structure: found '{found_file}' but expected either a WasmEdge directory or standard directories (bin, lib64, include, lib).\n\nThis might indicate:\n  1. A corrupted download\n  2. An unsupported archive format\n  3. A change in the WasmEdge release structure"))]
     InvalidArchiveStructure { found_file: String },
+
+    #[snafu(display(
+        "Home directory could not be determined. Please specify an installation path using --path"
+    ))]
+    HomeDirNotFound,
+
+    #[snafu(display("Failed to build HTTP client: {reason}"))]
+    HttpClientBuild { reason: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
