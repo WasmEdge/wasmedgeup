@@ -10,8 +10,6 @@ use std::path::Path;
 
 #[cfg(windows)]
 use std::os::windows::fs::{symlink_dir, symlink_file};
-#[cfg(windows)]
-use std::path::Component;
 
 use std::fs::OpenOptions;
 use tokio::fs;
