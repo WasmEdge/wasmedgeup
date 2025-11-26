@@ -33,18 +33,17 @@ impl Default for TargetOS {
 }
 
 #[cfg(target_os = "linux")]
-macro_rules! unwrap_or_continue {
-    ($expr:expr, $variant:ident) => {
-        match $expr {
-            $variant(v) => v,
-            _ => continue,
-        }
-    };
-}
-
-#[cfg(target_os = "linux")]
 fn get_ubuntu_version() -> Option<(u32, u32)> {
     use std::fs;
+
+    macro_rules! unwrap_or_continue {
+        ($expr:expr, $variant:ident) => {
+            match $expr {
+                $variant(v) => v,
+                _ => continue,
+            }
+        };
+    }
 
     let Ok(lsb_release) = fs::read_to_string("/etc/lsb-release") else {
         return None;

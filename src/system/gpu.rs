@@ -1,6 +1,8 @@
-use crate::system::spec::{
-    AcceleratorSupport, CudaSpec, GpuSpec, GpuVendor, OpenClDeviceSpec, RocmSpec,
-};
+#[cfg(all(windows, feature = "opencl"))]
+use crate::system::spec::OpenClDeviceSpec;
+use crate::system::spec::{AcceleratorSupport, CudaSpec, GpuSpec, GpuVendor};
+#[cfg(unix)]
+use crate::system::spec::{OpenClDeviceSpec, RocmSpec};
 use std::path::PathBuf;
 
 #[cfg(unix)]
@@ -35,9 +37,11 @@ pub fn detect_gpu() -> (Vec<GpuSpec>, AcceleratorSupport, Vec<String>, Vec<Strin
     #[cfg(windows)]
     let mut errors = Vec::new();
 
+    #[cfg(unix)]
     let nvidia_smi = which("nvidia-smi");
     #[cfg(unix)]
     let rocminfo = which("rocminfo");
+    #[cfg(unix)]
     let clinfo = which("clinfo");
     let vulkaninfo = which("vulkaninfo");
 
@@ -145,7 +149,7 @@ pub fn detect_gpu() -> (Vec<GpuSpec>, AcceleratorSupport, Vec<String>, Vec<Strin
         #[cfg(feature = "opencl")]
         let mut opencl_available = false;
         #[cfg(not(feature = "opencl"))]
-        let mut opencl_available = false;
+        let opencl_available = false;
         #[cfg(feature = "opencl")]
         {
             if let Ok(platforms) = get_platforms() {

@@ -1,5 +1,6 @@
 use crate::system::spec::{LibcKind, LibcSpec, OsSpec};
 use crate::target::{TargetArch, TargetOS};
+#[cfg(unix)]
 use std::fs;
 #[cfg(unix)]
 use std::process::Command;

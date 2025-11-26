@@ -74,8 +74,9 @@ pub fn detect_cpu() -> (CpuSpec, Vec<String>, Vec<String>) {
             .get_processor_brand_string()
             .map(|s| s.as_str().trim().to_string());
 
-        let sys =
-            System::new_with_specifics(RefreshKind::new().with_cpu(CpuRefreshKind::everything()));
+        let sys = System::new_with_specifics(
+            RefreshKind::nothing().with_cpu(CpuRefreshKind::everything()),
+        );
         let cores_logical = Some(sys.cpus().len() as u32);
         let cores_physical = None;
 
