@@ -13,7 +13,7 @@ use opencl3::platform::{get_platforms, Platform};
 #[cfg(windows)]
 use serde::Deserialize;
 #[cfg(windows)]
-use wmi::{COMLibrary, WMIConnection};
+use wmi::WMIConnection;
 
 #[cfg(windows)]
 #[derive(Deserialize)]
@@ -177,26 +177,24 @@ pub fn detect_gpu() -> (Vec<GpuSpec>, AcceleratorSupport, Vec<String>, Vec<Strin
         }
         // WMI fallback if no GPUs found
         if gpus.is_empty() {
-            if let Ok(com) = COMLibrary::new() {
-                if let Ok(wmi_con) = WMIConnection::new(com.into()) {
-                    if let Ok(results) = wmi_con.query::<VideoController>() {
-                        for v in results {
-                            let name: Option<String> = v.name;
-                            let ram_mb: Option<u32> =
-                                v.adapter_ram.map(|n| (n as u64 / (1024 * 1024)) as u32);
-                            gpus.push(GpuSpec {
-                                vendor: name
-                                    .as_ref()
-                                    .map(|s| vendor_from_str(s))
-                                    .unwrap_or(GpuVendor::Other),
-                                model: name,
-                                vram_mb: ram_mb,
-                                bus: None,
-                                cuda: None,
-                                rocm: None,
-                                opencl: None,
-                            });
-                        }
+            if let Ok(wmi_con) = WMIConnection::new() {
+                if let Ok(results) = wmi_con.query::<VideoController>() {
+                    for v in results {
+                        let name: Option<String> = v.name;
+                        let ram_mb: Option<u32> =
+                            v.adapter_ram.map(|n| (n as u64 / (1024 * 1024)) as u32);
+                        gpus.push(GpuSpec {
+                            vendor: name
+                                .as_ref()
+                                .map(|s| vendor_from_str(s))
+                                .unwrap_or(GpuVendor::Other),
+                            model: name,
+                            vram_mb: ram_mb,
+                            bus: None,
+                            cuda: None,
+                            rocm: None,
+                            opencl: None,
+                        });
                     }
                 }
             }
