@@ -1,7 +1,6 @@
 pub mod install;
 pub mod list;
 pub mod remove;
-mod specs;
 pub mod utils;
 pub mod version;
 
@@ -11,7 +10,6 @@ use clap::{Parser, Subcommand};
 use install::PluginInstallArgs;
 use list::PluginListArgs;
 use remove::PluginRemoveArgs;
-use specs::PluginSpecsArgs;
 
 #[derive(Debug, Parser)]
 pub struct PluginCli {
@@ -27,8 +25,6 @@ pub enum PluginCommands {
     List(PluginListArgs),
     /// Uninstall the specified WasmEdge plugin(s)
     Remove(PluginRemoveArgs),
-    /// Show detected system specs used for plugin compatibility and selection
-    Specs(PluginSpecsArgs),
 }
 
 impl CommandExecutor for PluginCli {
@@ -37,7 +33,6 @@ impl CommandExecutor for PluginCli {
             PluginCommands::Install(args) => args.execute(ctx).await,
             PluginCommands::List(args) => args.execute(ctx).await,
             PluginCommands::Remove(args) => args.execute(ctx).await,
-            PluginCommands::Specs(args) => args.execute(ctx).await,
         }
     }
 }
