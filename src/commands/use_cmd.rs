@@ -42,7 +42,7 @@ impl CommandExecutor for UseArgs {
 
         fs::create_version_symlinks(&target_dir, &version.to_string()).await?;
 
-        tracing::info!(%version, "Switched to WasmEdge version");
+        println!("Switched to WasmEdge runtime version: {version}");
         Ok(())
     }
 }

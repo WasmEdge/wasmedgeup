@@ -196,6 +196,11 @@ impl CommandExecutor for InstallArgs {
         crate::fs::create_version_symlinks(&target_dir, &version.to_string()).await?;
         shell_utils::setup_path(&target_dir)?;
 
+        println!(
+            "Installed WasmEdge {version}\nInstall root: {}",
+            target_dir.display()
+        );
+
         Ok(())
     }
 }
