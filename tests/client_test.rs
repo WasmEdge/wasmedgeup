@@ -89,6 +89,7 @@ async fn test_get_release_checksum() {
         tmpdir: None,
         os: None,
         arch: None,
+        no_verify: false,
     };
     let os = args.os.get_or_insert_default();
     let arch = args.arch.get_or_insert_default();

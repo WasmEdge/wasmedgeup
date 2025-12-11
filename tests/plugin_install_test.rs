@@ -19,6 +19,7 @@ async fn execute_runtime_install(version: String, install_dir: &Path, tmpdir: &T
         tmpdir: Some(tmpdir.path().to_path_buf()),
         os: None,
         arch: None,
+        no_verify: false,
     };
 
     let client = WasmEdgeApiClient::default();

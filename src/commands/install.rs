@@ -44,6 +44,12 @@ pub struct InstallArgs {
     /// `wasmedgeup` will detect the architecture of your host system by default.
     #[arg(short, long)]
     pub arch: Option<TargetArch>,
+
+    /// Skip checksum retrieval and verification for the downloaded asset
+    ///
+    /// This option disables integrity verification.
+    #[arg(long)]
+    pub no_verify: bool,
 }
 
 impl CommandExecutor for InstallArgs {
@@ -92,25 +98,32 @@ impl CommandExecutor for InstallArgs {
         )?;
         tracing::debug!(tmpdir = %tmpdir.display(), "Created temporary directory");
 
-        let expected_checksum = ctx
-            .client
-            .get_release_checksum(&version, &asset)
-            .await
-            .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to get checksum"))?;
-        tracing::debug!(%expected_checksum, "Got release checksum");
-
         let mut file = ctx
             .client
             .download_asset(&asset, &tmpdir, ctx.no_progress)
             .await
             .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to download asset"))?
             .into_file();
-        WasmEdgeApiClient::verify_file_checksum(&mut file, &expected_checksum)
-            .await
-            .inspect_err(
-                |e| tracing::error!(error = %e.to_string(), "Checksum verification failed"),
-            )?;
-        tracing::debug!("Checksum verified successfully");
+
+        if self.no_verify {
+            tracing::warn!("Skipping checksum retrieval and verification due to --no-verify flag");
+        } else {
+            let expected_checksum = ctx
+                .client
+                .get_release_checksum(&version, &asset)
+                .await
+                .inspect_err(
+                    |e| tracing::error!(error = %e.to_string(), "Failed to get checksum"),
+                )?;
+            tracing::debug!(%expected_checksum, "Got release checksum");
+
+            WasmEdgeApiClient::verify_file_checksum(&mut file, &expected_checksum)
+                .await
+                .inspect_err(
+                    |e| tracing::error!(error = %e.to_string(), "Checksum verification failed"),
+                )?;
+            tracing::debug!("Checksum verified successfully");
+        }
 
         tracing::debug!(dest = %tmpdir.display(), "Starting extraction of asset");
         crate::fs::extract_archive(&mut file, &tmpdir)
