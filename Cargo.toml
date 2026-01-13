@@ -33,7 +33,7 @@ which = "8"
 raw-cpuid = "11"
 
 [target.'cfg(unix)'.dependencies]
-flate2 = "1.1.5"
+flate2 = "1.1.8"
 tar = "0.4.44"
 
 [target.'cfg(windows)'.dependencies]
