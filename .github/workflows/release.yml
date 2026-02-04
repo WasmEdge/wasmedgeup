@@ -7,27 +7,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  get-tag:
-    if: (github.head_ref == 'knope/release' && github.event.pull_request.merged == true) || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - run: echo "tag_name=$(gh release list --json 'isDraft,tagName' --jq '.[] | select(.isDraft) | .tagName')" >> "$GITHUB_OUTPUT"
-        env:
-          GH_TOKEN: ${{ github.token }}
-        id: get-tag
-
-    outputs:
-      tag_name: ${{ steps.get-tag.outputs.tag_name }}
-
   build-artifacts:
-    needs: [get-tag]
-    if: needs.get-tag.outputs.tag_name != ''
+    if: (github.head_ref == 'release' && github.event.pull_request.merged == true) || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -105,7 +86,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [get-tag, build-artifacts]
+    needs: [build-artifacts]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -116,23 +97,29 @@ jobs:
           egress-policy: audit
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Upload artifacts to release
-        run: |
-          cd artifacts
-          gh release upload ${{ needs.get-tag.outputs.tag_name }} ./*
-          gh release edit ${{ needs.get-tag.outputs.tag_name }} --draft=false --latest
+      - uses: knope-dev/action@407e9ef7c272d2dd53a4e71e39a7839e29933c48 # v2.1.0
+        with:
+          version: 0.22.2
+
+      - name: Release
+        run: knope release --verbose
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-crate:
     needs: [release]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
@@ -144,6 +131,11 @@ jobs:
       - name: Setup rust toolchain
         uses: ./.github/actions/setup-rust
 
-      - uses: katyo/publish-crate@v2
-        with:
-          registry-token: ${{ secrets.CARGO_TOKEN }}
+      - name: Authenticate with crates.io
+        uses: rust-lang/crates-io-auth-action@041cce5b4b821e6b0ebc9c9c38b58cac4e34dcc2 # v1.0.2
+        id: auth
+
+      - name: Publish to crates.io
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
