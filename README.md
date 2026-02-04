@@ -85,6 +85,25 @@ wasmedgeup --help
 
 Please refer to the [specification](spec.md) for detailed usage instructions.
 
+## Release Process
+
+Releases are automated via [Knope](https://knope.tech) and GitHub Actions.
+
+1. **Push to `master`** — the `prepare-release` workflow runs `knope prepare-release`, which:
+   - Scans conventional commits since the last release
+   - Bumps the version in `Cargo.toml` / `Cargo.lock`
+   - Updates `CHANGELOG.md`
+   - Opens (or updates) a PR from the `release` branch to `master`
+
+2. **Merge the release PR** — the `release` workflow builds artifacts for all platforms, then runs `knope release` to publish the GitHub release with attached binaries. The crate is then published to crates.io.
+
+If a push contains no releasable changes (e.g. `chore(deps):` bumps only), the prepare-release step exits gracefully and no PR is created.
+
+### Prerequisites
+
+- A **Personal Access Token** stored as the repository secret `PAT` with `contents: write` and `pull-requests: write` scopes. This is required so the release PR triggers CI checks.
+- **Trusted publishing** configured on crates.io for the `wasmedgeup` crate (no secret needed — uses GitHub OIDC).
+
 ## License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
