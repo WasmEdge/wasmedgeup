@@ -2783,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "wasmedgeup"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cfg-if",
  "clap",
