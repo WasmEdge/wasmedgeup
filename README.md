@@ -1,7 +1,5 @@
 # WasmEdgeUp
 
-Note: This project is still in development and not yet ready for use.
-
 `wasmedgeup` is a command-line tool for managing WasmEdge runtime installations and plugins across different operating systems and architectures.
 
 ## Features
@@ -14,9 +12,35 @@ Note: This project is still in development and not yet ready for use.
 
 ## Installation
 
-Requires the Rust toolchain (Cargo). If you don't have Cargo installed, install Rust via rustup: [rustup.rs](https://rustup.rs)
+### Option 1: Install from crates.io
 
-### 1) Clone and build
+If you have the Rust toolchain installed ([rustup.rs](https://rustup.rs)):
+
+```sh
+cargo install wasmedgeup
+```
+
+### Option 2: Pre-built binaries
+
+Download a pre-built binary from the [GitHub releases page](https://github.com/WasmEdge/wasmedgeup/releases).
+
+| Target | OS | Arch |
+| --- | --- | --- |
+| `x86_64-unknown-linux-gnu` | Linux | x86_64 |
+| `x86_64-unknown-linux-musl` | Linux | x86_64 (static) |
+| `aarch64-unknown-linux-gnu` | Linux | ARM64 |
+| `aarch64-unknown-linux-musl` | Linux | ARM64 (static) |
+| `x86_64-apple-darwin` | macOS | x86_64 |
+| `aarch64-apple-darwin` | macOS | Apple Silicon |
+| `x86_64-pc-windows-msvc` | Windows | x86_64 |
+
+```sh
+# Example for Linux x86_64
+curl -LO https://github.com/WasmEdge/wasmedgeup/releases/latest/download/wasmedgeup-x86_64-unknown-linux-gnu.tgz
+tar xzf wasmedgeup-x86_64-unknown-linux-gnu.tgz
+```
+
+### Option 3: Build from source
 
 ```sh
 git clone https://github.com/WasmEdge/wasmedgeup.git
@@ -24,62 +48,7 @@ cd wasmedgeup
 cargo build --release
 ```
 
-### 2) Install the binary to your PATH
-
-#### Linux
-
-```sh
-mkdir -p "$HOME/.local/bin"
-cp target/release/wasmedgeup "$HOME/.local/bin/"
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-# For zsh users:
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc"
-```
-
-Open a new terminal (or run `source ~/.bashrc` / `source ~/.zshrc`) and verify:
-
-```sh
-wasmedgeup --help
-```
-
-#### macOS
-
-Option A: user-local install
-
-```sh
-mkdir -p "$HOME/.local/bin"
-cp target/release/wasmedgeup "$HOME/.local/bin/"
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc"
-```
-
-Option B: system-wide (may require sudo)
-
-```sh
-sudo cp target/release/wasmedgeup /usr/local/bin/
-```
-
-Then open a new terminal and run:
-
-```sh
-wasmedgeup --help
-```
-
-#### Windows (PowerShell)
-
-```powershell
-cargo build --release
-New-Item -Force -ItemType Directory "$env:USERPROFILE\.cargo\bin" | Out-Null
-Copy-Item -Force target\release\wasmedgeup.exe "$env:USERPROFILE\.cargo\bin\"
-
-# Ensure the directory is on PATH (per-user)
-[Environment]::SetEnvironmentVariable(
-  'Path',
-  [Environment]::GetEnvironmentVariable('Path','User') + ";$env:USERPROFILE\\.cargo\\bin",
-  'User'
-)
-# Restart your terminal, then:
-wasmedgeup --help
-```
+The binary will be at `target/release/wasmedgeup`. Move it somewhere on your `PATH` to use it.
 
 ## Usage
 

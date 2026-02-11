@@ -5,4 +5,6 @@ MD013:                 # Line length 80 is far to short
   line_length: 999     # We allow soft wrapped paragraphs and raw code outputs
 MD029: false           # Ordered list item prefix
 MD033: false           # Allow inline HTML
+MD024:                 # No duplicate headings
+  siblings_only: true  # Allow repeated headings under different parents (e.g. changelogs)
 MD041: false           # Allow first line in file is not a top level header
