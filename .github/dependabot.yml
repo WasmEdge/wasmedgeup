@@ -4,13 +4,25 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      rust-dependencies:
+        patterns:
+          - "*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
 
   - package-ecosystem: "github-actions"
     directory: "/.github/actions/setup-rust"
     schedule:
       interval: "weekly"
+    groups:
+      github-actions-setup-rust:
+        patterns:
+          - "*"
