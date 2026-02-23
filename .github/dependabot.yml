@@ -4,13 +4,30 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      rust-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      github-actions:
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "github-actions"
     directory: "/.github/actions/setup-rust"
     schedule:
       interval: "weekly"
+    groups:
+      github-actions:
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
