@@ -111,7 +111,7 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - uses: knope-dev/action@407e9ef7c272d2dd53a4e71e39a7839e29933c48 # v2.1.0
+      - uses: knope-dev/action@19617851f9f13ab2f27a05989c55efb18aca3675 # v2.1.2
         with:
           version: 0.22.2
 
@@ -138,7 +138,7 @@ jobs:
         uses: ./.github/actions/setup-rust
 
       - name: Authenticate with crates.io
-        uses: rust-lang/crates-io-auth-action@041cce5b4b821e6b0ebc9c9c38b58cac4e34dcc2 # v1.0.2
+        uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1.0.3
         id: auth
 
       - name: Publish to crates.io

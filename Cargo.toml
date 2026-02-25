@@ -10,14 +10,14 @@ license = "Apache-2.0"
 
 [dependencies]
 cfg-if = "1.0.4"
-clap = { version = "4.5.57", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive"] }
 dirs = "6.0.0"
 git2 = { version = "0.20.4", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 indicatif = { version = "0.18.3", features = ["tokio"] }
 reqwest = "0.13.2"
 semver = "1.0.27"
 snafu = "0.8.9"
-tempfile = "3.24.0"
+tempfile = "3.26.0"
 tokio = { version = "1.49.0", features = ["fs", "macros", "rt-multi-thread"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.22"
@@ -28,7 +28,7 @@ serial_test = "3.3.1"
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sysinfo = "0.38.1"
+sysinfo = "0.38.2"
 which = "8"
 raw-cpuid = "11"
 
@@ -37,9 +37,9 @@ flate2 = "1.1.9"
 tar = "0.4.44"
 
 [target.'cfg(windows)'.dependencies]
-zip = "7.4.0"
+zip = "8.1.0"
 winreg = "0.55"
-nvml-wrapper = "0.11"
+nvml-wrapper = "0.12"
 wmi = "0.18"
 
 [target.'cfg(windows)'.dependencies.opencl3]
