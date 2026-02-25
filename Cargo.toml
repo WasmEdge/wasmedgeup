@@ -10,7 +10,7 @@ license = "Apache-2.0"
 
 [dependencies]
 cfg-if = "1.0.4"
-clap = { version = "4.5.57", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive"] }
 dirs = "6.0.0"
 git2 = { version = "0.20.4", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 indicatif = { version = "0.18.3", features = ["tokio"] }
