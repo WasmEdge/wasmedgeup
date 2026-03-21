@@ -50,8 +50,11 @@ jobs:
           VALIDATE_MARKDOWN: true
           VALIDATE_YAML: true
           # Misc configuration
-          ENFORCE_COMMITLINT_CONFIGURATION_CHECK: true
-          VALIDATE_GIT_COMMITLINT: true
+          # Only validate commit messages on push to master (not on PRs)
+          # because PRs are squash-merged, so individual commit messages
+          # don't appear in the final history.
+          ENFORCE_COMMITLINT_CONFIGURATION_CHECK: ${{ github.event_name == 'push' }}
+          VALIDATE_GIT_COMMITLINT: ${{ github.event_name == 'push' }}
           VALIDATE_GITHUB_ACTIONS: true
           VALIDATE_GITLEAKS: true
           # Do not rely on the statuses permission
