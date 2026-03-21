@@ -34,7 +34,7 @@ raw-cpuid = "11"
 
 [target.'cfg(unix)'.dependencies]
 flate2 = "1.1.9"
-tar = "0.4.44"
+tar = "0.4.45"
 
 [target.'cfg(windows)'.dependencies]
 zip = "8.1.0"
