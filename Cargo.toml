@@ -37,7 +37,7 @@ flate2 = "1.1.9"
 tar = "0.4.45"
 
 [target.'cfg(windows)'.dependencies]
-zip = "8.1.0"
+zip = "8.4.0"
 winreg = "0.56"
 nvml-wrapper = "0.12"
 wmi = "0.18"
