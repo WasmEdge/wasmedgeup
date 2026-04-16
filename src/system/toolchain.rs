@@ -41,17 +41,29 @@ fn which(bin: &str) -> Option<PathBuf> {
     })
 }
 
-pub fn get_installed_wasmedge_version() -> Result<String, String> {
-    let out = Command::new("wasmedge")
-        .arg("--version")
-        .output()
-        .map_err(|e| format!("failed to exec wasmedge: {e}"))?;
+/// Runs `wasmedge --version` and extracts the reported version string.
+///
+/// Returns `None` if `wasmedge` is not on PATH, exits non-zero, or emits
+/// no recognizable version token. The specific failure reason is logged
+/// at debug level for troubleshooting.
+pub fn get_installed_wasmedge_version() -> Option<String> {
+    let out = match Command::new("wasmedge").arg("--version").output() {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::debug!(error = %e, "failed to exec wasmedge");
+            return None;
+        }
+    };
     if !out.status.success() {
-        return Err("wasmedge --version exited with non-zero status".to_string());
+        tracing::debug!(status = %out.status, "wasmedge --version exited non-zero");
+        return None;
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    parse_wasmedge_version_output(&stdout)
-        .ok_or_else(|| format!("unable to parse version from: {}", stdout.trim()))
+    let parsed = parse_wasmedge_version_output(&stdout);
+    if parsed.is_none() {
+        tracing::debug!(output = %stdout.trim(), "unable to parse wasmedge version token");
+    }
+    parsed
 }
 
 /// Extract a semver-like version token from `wasmedge --version` output.

@@ -1,6 +1,6 @@
 use snafu::Snafu;
 
-#[derive(Debug, Default, Snafu)]
+#[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Version {version} not found in wasmedge installation"))]
@@ -21,6 +21,12 @@ pub enum Error {
     #[snafu(display("Unable to request resource '{}'", resource))]
     Request {
         source: reqwest::Error,
+        resource: &'static str,
+    },
+
+    #[snafu(display("Unable to parse JSON from '{}'", resource))]
+    Json {
+        source: serde_json::Error,
         resource: &'static str,
     },
 
@@ -76,9 +82,8 @@ pub enum Error {
     ))]
     RuntimeNotFound,
 
-    #[default]
-    #[snafu(display("Unknown error occurred"))]
-    Unknown,
+    #[snafu(display("No WasmEdge releases were found"))]
+    NoReleasesFound,
 
     #[snafu(display("No plugins specified for installation"))]
     NoPluginsSpecified,

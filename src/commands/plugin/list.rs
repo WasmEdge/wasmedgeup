@@ -38,13 +38,19 @@ impl CommandExecutor for PluginListArgs {
     async fn execute(self, _ctx: CommandContext) -> Result<()> {
         let spec = system::detect();
 
+        // Short-circuit on `--runtime`: when the user passes one explicitly we
+        // must not spawn `wasmedge --version`, otherwise an explicit-runtime
+        // call still pays for (and depends on) local toolchain detection.
         let runtime = if let Some(r) = self.runtime {
             r
         } else {
             match system::toolchain::get_installed_wasmedge_version() {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("WasmEdge runtime not found: {e}. Install a runtime first (e.g., wasmedgeup install 0.15.0).");
+                Some(v) => v,
+                None => {
+                    eprintln!(
+                        "WasmEdge runtime not found. Install a runtime first \
+                        (e.g., wasmedgeup install 0.15.0)."
+                    );
                     return Err(Error::RuntimeNotFound);
                 }
             }
@@ -73,8 +79,9 @@ impl CommandExecutor for PluginListArgs {
 
         let assets = match fetch_release_assets(&runtime).await {
             Ok(v) => v,
-            Err(_) => {
-                eprintln!("failed to fetch release assets for tag {runtime}");
+            Err(e) => {
+                tracing::warn!(error = %e, tag = %runtime, "failed to fetch plugin release assets");
+                eprintln!("failed to fetch release assets for tag {runtime}: {e}");
                 Vec::new()
             }
         };
@@ -249,7 +256,9 @@ struct AssetInfo {
     platform: String,
 }
 
-async fn fetch_release_assets(tag: &str) -> Result<Vec<AssetInfo>, ()> {
+async fn fetch_release_assets(tag: &str) -> Result<Vec<AssetInfo>> {
+    use snafu::ResultExt;
+
     let url = format!("{WASMEDGE_GH_RELEASE_TAG_API}/{tag}");
     let client = reqwest::Client::new();
     let resp = client
@@ -257,12 +266,26 @@ async fn fetch_release_assets(tag: &str) -> Result<Vec<AssetInfo>, ()> {
         .header("User-Agent", UA)
         .send()
         .await
-        .map_err(|_| ())?;
-    if !resp.status().is_success() {
-        return Err(());
+        .context(RequestSnafu {
+            resource: "plugin release metadata",
+        })?;
+    // A 404 means the tag doesn't exist (or has no published assets) —
+    // degrade gracefully to an empty list. Other non-2xx statuses (403
+    // rate-limit, 5xx outage, etc.) propagate as errors so the caller can
+    // surface them to the user instead of silently reporting "no plugins".
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        tracing::debug!(tag, "release metadata 404 — tag has no published assets");
+        return Ok(Vec::new());
     }
-    let text = resp.text().await.map_err(|_| ())?;
-    let v: Value = serde_json::from_str(&text).map_err(|_| ())?;
+    let resp = resp.error_for_status().context(RequestSnafu {
+        resource: "plugin release metadata",
+    })?;
+    let text = resp.text().await.context(RequestSnafu {
+        resource: "plugin release metadata body",
+    })?;
+    let v: Value = serde_json::from_str(&text).context(JsonSnafu {
+        resource: "plugin release metadata",
+    })?;
     let mut out = Vec::new();
     if let Some(arr) = v.get("assets").and_then(|a| a.as_array()) {
         for a in arr {
