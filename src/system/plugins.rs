@@ -69,33 +69,3 @@ pub fn plugin_platform_key(os: &OsSpec, runtime_version: &Version) -> Result<Str
         }
     }
 }
-
-pub fn platform_key_from_specs(os: &OsSpec) -> Result<String> {
-    let arch_str = arch_to_string(&os.arch);
-    match os.os_type {
-        TargetOS::Darwin => {
-            let darwin_arch = arch_to_darwin_string(&os.arch);
-            Ok(format!("darwin_{darwin_arch}"))
-        }
-        TargetOS::Windows => Ok("windows_x86_64".to_string()),
-        TargetOS::Linux | TargetOS::Ubuntu => {
-            let distro = os.distro.as_deref().unwrap_or("").to_lowercase();
-            let version = os.version.as_deref().unwrap_or("");
-            if distro.contains("ubuntu") {
-                if version.starts_with("20.04") || version.starts_with("20") {
-                    return Ok(format!("ubuntu20_04_{arch_str}"));
-                }
-                if version.starts_with("22.04") || version.starts_with("22") {
-                    return Ok(format!("ubuntu22_04_{arch_str}"));
-                }
-            }
-            if matches!(os.libc.kind, LibcKind::Glibc) {
-                return Ok(format!("manylinux_2_28_{arch_str}"));
-            }
-            Err(Error::UnsupportedPlatform {
-                os: format!("{:?}", os.os_type),
-                arch: format!("{:?}", os.arch),
-            })
-        }
-    }
-}

@@ -14,7 +14,7 @@ fn default_path() -> Result<PathBuf> {
 
 pub fn insufficient_permissions(path: &Path, action: &str, version: &str) -> Error {
     let system_dir = if cfg!(windows) {
-        "C\\Program Files\\WasmEdge".to_string()
+        "C:\\Program Files\\WasmEdge".to_string()
     } else {
         "/usr/local".to_string()
     };
