@@ -371,3 +371,140 @@ pub fn runtime_ge_015(runtime: &str) -> bool {
         .map(|v| v >= semver::Version::new(0, 15, 0))
         .unwrap_or(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(s: &str) -> Version {
+        Version::parse(s).expect("valid semver")
+    }
+
+    #[test]
+    fn archive_name_ubuntu_x86_64() {
+        let a = Asset::new(&v("0.15.0"), &TargetOS::Ubuntu, &TargetArch::X86_64);
+        assert_eq!(a.archive_name, "WasmEdge-0.15.0-ubuntu20.04_x86_64.tar.gz");
+    }
+
+    #[test]
+    fn archive_name_ubuntu_aarch64_requires_0_13_5() {
+        let old = Asset::new(&v("0.13.4"), &TargetOS::Ubuntu, &TargetArch::Aarch64);
+        assert_eq!(
+            old.archive_name, "WasmEdge-0.13.4-manylinux2014_aarch64.tar.gz",
+            "pre-0.13.5 aarch64 Ubuntu should fall back to manylinux"
+        );
+
+        let new = Asset::new(&v("0.13.5"), &TargetOS::Ubuntu, &TargetArch::Aarch64);
+        assert_eq!(
+            new.archive_name, "WasmEdge-0.13.5-ubuntu20.04_aarch64.tar.gz",
+            "0.13.5+ aarch64 Ubuntu uses ubuntu20.04 asset"
+        );
+    }
+
+    #[test]
+    fn archive_name_linux_manylinux_split_on_0_15() {
+        let old = Asset::new(&v("0.14.1"), &TargetOS::Linux, &TargetArch::X86_64);
+        assert_eq!(
+            old.archive_name, "WasmEdge-0.14.1-manylinux2014_x86_64.tar.gz",
+            "<= 0.14 uses manylinux2014"
+        );
+
+        let new = Asset::new(&v("0.15.0"), &TargetOS::Linux, &TargetArch::X86_64);
+        assert_eq!(
+            new.archive_name, "WasmEdge-0.15.0-manylinux_2_28_x86_64.tar.gz",
+            ">= 0.15 uses manylinux_2_28"
+        );
+    }
+
+    #[test]
+    fn archive_name_darwin_uses_arm64_alias() {
+        let a = Asset::new(&v("0.15.0"), &TargetOS::Darwin, &TargetArch::Aarch64);
+        assert_eq!(a.archive_name, "WasmEdge-0.15.0-darwin_arm64.tar.gz");
+
+        let x = Asset::new(&v("0.15.0"), &TargetOS::Darwin, &TargetArch::X86_64);
+        assert_eq!(x.archive_name, "WasmEdge-0.15.0-darwin_x86_64.tar.gz");
+    }
+
+    #[test]
+    fn archive_name_windows_is_zip() {
+        let a = Asset::new(&v("0.15.0"), &TargetOS::Windows, &TargetArch::X86_64);
+        assert_eq!(a.archive_name, "WasmEdge-0.15.0-windows.zip");
+    }
+
+    #[test]
+    fn install_name_per_os() {
+        let lin = Asset::new(&v("0.15.0"), &TargetOS::Linux, &TargetArch::X86_64);
+        assert_eq!(lin.install_name, "WasmEdge-0.15.0-Linux");
+        let ubu = Asset::new(&v("0.15.0"), &TargetOS::Ubuntu, &TargetArch::X86_64);
+        assert_eq!(ubu.install_name, "WasmEdge-0.15.0-Linux");
+        let mac = Asset::new(&v("0.15.0"), &TargetOS::Darwin, &TargetArch::Aarch64);
+        assert_eq!(mac.install_name, "WasmEdge-0.15.0-Darwin");
+        let win = Asset::new(&v("0.15.0"), &TargetOS::Windows, &TargetArch::X86_64);
+        assert_eq!(win.install_name, "WasmEdge-0.15.0-Windows");
+    }
+
+    #[test]
+    fn manylinux2014_supported_boundary() {
+        assert!(is_manylinux2014_supported(&v("0.13.0")));
+        assert!(is_manylinux2014_supported(&v("0.14.99")));
+        assert!(!is_manylinux2014_supported(&v("0.15.0")));
+        assert!(!is_manylinux2014_supported(&v("1.0.0")));
+    }
+
+    #[test]
+    fn arm_ubuntu_supported_boundary() {
+        assert!(!is_arm_ubuntu_supported(&v("0.13.4")));
+        assert!(is_arm_ubuntu_supported(&v("0.13.5")));
+        assert!(is_arm_ubuntu_supported(&v("0.15.0")));
+    }
+
+    #[test]
+    fn asset_url_is_valid() {
+        let a = Asset::new(&v("0.15.0"), &TargetOS::Linux, &TargetArch::X86_64);
+        let url = a.url().expect("url builds");
+        assert_eq!(
+            url.as_str(),
+            "https://github.com/WasmEdge/WasmEdge/releases/download/0.15.0/WasmEdge-0.15.0-manylinux_2_28_x86_64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn latest_installed_version_missing_dir_is_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("nope");
+        assert_eq!(latest_installed_version(&missing).unwrap(), None);
+    }
+
+    #[test]
+    fn latest_installed_version_empty_dir_is_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert_eq!(latest_installed_version(tmp.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn latest_installed_version_picks_highest_semver() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for name in ["0.14.1", "0.15.0", "0.13.5", "not-a-version"] {
+            std::fs::create_dir(tmp.path().join(name)).expect("mkdir");
+        }
+        // Also drop a regular file to ensure it's ignored.
+        std::fs::write(tmp.path().join("stray.txt"), "").expect("file");
+
+        let picked = latest_installed_version(tmp.path()).unwrap();
+        assert_eq!(picked, Some(v("0.15.0")));
+    }
+
+    #[test]
+    fn runtime_ge_015_boundaries() {
+        assert!(!runtime_ge_015("0.14.99"));
+        assert!(runtime_ge_015("0.15.0"));
+        // semver ordering: prereleases sort before the stable release.
+        assert!(
+            !runtime_ge_015("0.15.0-rc.1"),
+            "0.15.0-rc.1 < 0.15.0 per semver rules",
+        );
+        assert!(runtime_ge_015("1.0.0"));
+        // Unparseable input fails open (defensive).
+        assert!(runtime_ge_015("not-a-version"));
+    }
+}

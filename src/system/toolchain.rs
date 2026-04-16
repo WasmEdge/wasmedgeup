@@ -50,21 +50,82 @@ pub fn get_installed_wasmedge_version() -> Result<String, String> {
         return Err("wasmedge --version exited with non-zero status".to_string());
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // Heuristic parse: pick the first token that starts with a digit and contains at least one '.'
-    // e.g., "wasmedge version 0.15.0" -> 0.15.0
-    // also accept prerelease like 0.15.0-rc.1
+    parse_wasmedge_version_output(&stdout)
+        .ok_or_else(|| format!("unable to parse version from: {}", stdout.trim()))
+}
+
+/// Extract a semver-like version token from `wasmedge --version` output.
+///
+/// Picks the first whitespace-separated token that starts with an ASCII
+/// digit and contains at least one `.`, then trims trailing characters
+/// that are not alphanumerics, `.`, or `-`. Returns `None` if no token
+/// matches.
+pub(crate) fn parse_wasmedge_version_output(stdout: &str) -> Option<String> {
     for token in stdout.split_whitespace() {
-        if token
+        let starts_with_digit = token
             .chars()
             .next()
             .map(|c| c.is_ascii_digit())
-            .unwrap_or(false)
-            && token.contains('.')
-        {
+            .unwrap_or(false);
+        if starts_with_digit && token.contains('.') {
             let ver = token
                 .trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '-');
-            return Ok(ver.to_string());
+            return Some(ver.to_string());
         }
     }
-    Err(format!("unable to parse version from: {}", stdout.trim()))
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_wasmedge_version_output;
+
+    #[test]
+    fn parses_simple_version() {
+        assert_eq!(
+            parse_wasmedge_version_output("wasmedge version 0.15.0"),
+            Some("0.15.0".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_prerelease_version() {
+        assert_eq!(
+            parse_wasmedge_version_output("wasmedge version 0.15.0-rc.1"),
+            Some("0.15.0-rc.1".to_string())
+        );
+    }
+
+    #[test]
+    fn trims_trailing_non_version_chars() {
+        // Characters other than alphanumerics, '.', and '-' should be trimmed
+        // from the tail; a trailing comma/paren is stripped while a legitimate
+        // trailing '.' or '-' would be preserved.
+        assert_eq!(
+            parse_wasmedge_version_output("wasmedge version 0.15.0, build info"),
+            Some("0.15.0".to_string())
+        );
+        assert_eq!(
+            parse_wasmedge_version_output("wasmedge (version 0.15.0)"),
+            Some("0.15.0".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_for_no_version_token() {
+        assert_eq!(parse_wasmedge_version_output("wasmedge (no version)"), None);
+    }
+
+    #[test]
+    fn returns_none_for_empty_output() {
+        assert_eq!(parse_wasmedge_version_output(""), None);
+    }
+
+    #[test]
+    fn ignores_leading_non_digit_tokens() {
+        assert_eq!(
+            parse_wasmedge_version_output("version: 0.14.1"),
+            Some("0.14.1".to_string())
+        );
+    }
 }
