@@ -87,13 +87,19 @@ impl WasmEdgeApiClient {
         Ok(named)
     }
 
-    pub async fn get_release_checksum(&self, version: &Version, asset: &Asset) -> Result<String> {
+    /// Fetch the SHA256 checksum for `archive_name` from the SHA256SUM file
+    /// published alongside release `tag`.
+    ///
+    /// The WasmEdge release process publishes a single SHA256SUM file per
+    /// release tag that lists hashes for both runtime archives and plugin
+    /// archives, so the same lookup serves both installer paths.
+    pub async fn get_archive_checksum(&self, tag: &str, archive_name: &str) -> Result<String> {
         let mut url = Url::parse(WASMEDGE_RELEASE_BASE_URL)
             .expect("WASMEDGE_RELEASE_BASE_URL must be a valid URL");
 
         url.path_segments_mut()
             .expect("base is valid URL")
-            .extend(&[&version.to_string(), CHECKSUM_FILE_NAME]);
+            .extend(&[tag, CHECKSUM_FILE_NAME]);
 
         tracing::debug!(%url, CHECKSUM_FILE_NAME, "Trying checksum file");
 
@@ -102,17 +108,28 @@ impl WasmEdgeApiClient {
             resource: "checksums",
         })?;
 
-        if !response.status().is_success() {
+        // 404/410 means the SHA256SUM file genuinely doesn't exist for this
+        // tag — surface ChecksumNotFound so callers can react. Other non-2xx
+        // statuses (403 rate-limit, 5xx outage) are operational errors and
+        // propagate via Error::Request so the user sees the actual status
+        // instead of a misleading "checksum not found".
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+        ) {
             tracing::debug!(
                 status = %response.status(),
                 file = CHECKSUM_FILE_NAME,
                 "Checksum file not found"
             );
             return Err(Error::ChecksumNotFound {
-                version: version.to_string(),
-                asset: asset.archive_name.clone(),
+                version: tag.to_string(),
+                asset: archive_name.to_string(),
             });
         }
+        let response = response.error_for_status().context(RequestSnafu {
+            resource: "checksums",
+        })?;
 
         let content = response.text().await.context(RequestSnafu {
             resource: "checksums",
@@ -124,30 +141,33 @@ impl WasmEdgeApiClient {
             "Got checksum file content"
         );
 
-        for (i, line) in content.lines().enumerate() {
-            tracing::debug!(line_num = i, line = line, "Processing checksum line");
-
+        for line in content.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() == 2 {
-                tracing::debug!(checksum = parts[0], file = parts[1], "Found checksum entry");
-
-                if parts[1] == asset.archive_name {
-                    tracing::debug!(checksum = parts[0], "Found matching checksum");
-                    return Ok(parts[0].to_string());
-                }
+            if parts.len() == 2 && parts[1] == archive_name {
+                tracing::debug!(
+                    checksum = parts[0],
+                    archive = archive_name,
+                    "checksum match"
+                );
+                return Ok(parts[0].to_string());
             }
         }
 
-        tracing::error!(
-            version = %version,
-            asset = %asset.archive_name,
-            "No checksum found in any file"
-        );
+        tracing::error!(tag, archive = archive_name, "No checksum entry for archive");
 
         Err(Error::ChecksumNotFound {
-            version: version.to_string(),
-            asset: asset.archive_name.clone(),
+            version: tag.to_string(),
+            asset: archive_name.to_string(),
         })
+    }
+
+    /// Fetch the SHA256 checksum for a runtime release asset.
+    ///
+    /// Thin wrapper over [`get_archive_checksum`] for callers that already
+    /// hold an [`Asset`] value (runtime installer path).
+    pub async fn get_release_checksum(&self, version: &Version, asset: &Asset) -> Result<String> {
+        self.get_archive_checksum(&version.to_string(), &asset.archive_name)
+            .await
     }
 
     pub async fn verify_file_checksum(file: &mut std::fs::File, expected: &str) -> Result<()> {
@@ -501,6 +521,18 @@ fn parse_plugin_asset_name(name: &str, tag: &str) -> Option<(String, String, Str
     Some((plugin.to_string(), tag.to_string(), platform.to_string()))
 }
 
+/// Build the canonical archive filename for a plugin, e.g.
+/// `WasmEdge-plugin-wasi_nn-ggml-0.15.0-manylinux_2_28_x86_64.tar.gz`.
+///
+/// The returned string matches the entry published in the release-level
+/// SHA256SUM file, so it can be used both to compose the download URL
+/// (see [`plugin_asset_url`]) and to look up the expected checksum via
+/// [`WasmEdgeApiClient::get_archive_checksum`].
+pub fn plugin_archive_name(plugin: &str, runtime: &str, platform: &str, is_zip: bool) -> String {
+    let ext = if is_zip { "zip" } else { "tar.gz" };
+    format!("{PLUGIN_ASSET_PREFIX}{plugin}-{runtime}-{platform}.{ext}")
+}
+
 /// Build the download URL for a plugin archive on GitHub releases.
 ///
 /// Produces `{base}/{runtime}/WasmEdge-plugin-{plugin}-{runtime}-{platform}.{ext}`
@@ -510,8 +542,7 @@ fn parse_plugin_asset_name(name: &str, tag: &str) -> Option<(String, String, Str
 /// probe builds *both* variants per host to discover whichever exists on
 /// the release.
 pub fn plugin_asset_url(plugin: &str, runtime: &str, platform: &str, is_zip: bool) -> Result<Url> {
-    let ext = if is_zip { "zip" } else { "tar.gz" };
-    let filename = format!("{PLUGIN_ASSET_PREFIX}{plugin}-{runtime}-{platform}.{ext}");
+    let filename = plugin_archive_name(plugin, runtime, platform, is_zip);
     let mut url = Url::parse(WASMEDGE_RELEASE_BASE_URL)
         .expect("WASMEDGE_RELEASE_BASE_URL must be a valid URL");
     url.path_segments_mut()
