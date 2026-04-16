@@ -4,15 +4,13 @@ use clap::{value_parser, Args};
 use tokio::fs;
 use walkdir::WalkDir;
 
-use crate::constants::WASMEDGE_RELEASE_BASE_URL;
+use crate::api::plugin_asset_url;
 use crate::system::plugins::plugin_platform_key;
 use crate::{
     cli::{CommandContext, CommandExecutor},
     commands::default_path,
     error::{Error, Result},
-    fs as wfs,
-    http::HttpClientConfig,
-    system,
+    fs as wfs, system,
 };
 
 use super::utils::find_plugin_shared_objects;
@@ -108,15 +106,7 @@ impl CommandExecutor for PluginInstallArgs {
             };
 
             let is_windows = matches!(specs.os.os_type, crate::target::TargetOS::Windows);
-            let ext = if is_windows { "zip" } else { "tar.gz" };
-            let url = format!(
-                "{base}/{ver}/WasmEdge-plugin-{name}-{ver}-{os_key}.{ext}",
-                base = WASMEDGE_RELEASE_BASE_URL,
-                name = name,
-                ver = pver,
-                os_key = os_key,
-                ext = ext,
-            );
+            let url = plugin_asset_url(name, &pver, &os_key, is_windows)?;
             tracing::debug!(%name, %pver, %url, "Downloading plugin");
 
             let workspace = tmp_root.join(format!("{name}-{pver}"));
@@ -127,7 +117,9 @@ impl CommandExecutor for PluginInstallArgs {
                 workspace.join("plugin.tar.gz")
             };
 
-            download_with_progress(&ctx, &url, &archive_path).await?;
+            ctx.client
+                .download_to_path(url, &archive_path, ctx.no_progress, "plugin download")
+                .await?;
 
             let mut file = std::fs::OpenOptions::new()
                 .read(true)
@@ -200,41 +192,4 @@ pub(super) fn select_runtime_version(
             version: "<none installed>".to_string(),
         }),
     }
-}
-
-async fn download_with_progress(ctx: &CommandContext, url: &str, to: &Path) -> Result<()> {
-    use tokio::io::AsyncWriteExt as _;
-
-    let client = HttpClientConfig::new()
-        .with_connect_timeout(ctx.client.connect_timeout)
-        .with_request_timeout(ctx.client.request_timeout)
-        .build()?;
-
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|source| Error::Request {
-            source,
-            resource: "plugin download",
-        })?;
-
-    let resp = resp.error_for_status().map_err(|source| Error::Request {
-        source,
-        resource: "plugin download",
-    })?;
-
-    let bytes = resp.bytes().await.map_err(|source| Error::Request {
-        source,
-        resource: "plugin download body",
-    })?;
-
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(to)
-        .await?;
-    file.write_all(&bytes).await?;
-    Ok(())
 }

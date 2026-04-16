@@ -1,18 +1,11 @@
-use crate::api::runtime_ge_015;
+use crate::api::{plugin_asset_url, runtime_ge_015};
 use crate::cli::{CommandContext, CommandExecutor};
-use crate::constants::{WASMEDGE_GH_RELEASE_TAG_API, WASMEDGE_RELEASE_BASE_URL};
 use crate::prelude::*;
 use crate::system;
 use crate::system::plugins::plugin_platform_key;
 use clap::Args;
-use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::HashSet;
-
-const UA: &str = "wasmedgeup";
-const ASSET_PREFIX: &str = "WasmEdge-plugin-";
-const TAR_GZ: &str = ".tar.gz";
-const ZIP: &str = ".zip";
 
 const UBUNTU20_PREFIX: &str = "ubuntu20_04_";
 const UBUNTU22_PREFIX: &str = "ubuntu22_04_";
@@ -35,7 +28,7 @@ pub struct PluginListArgs {
 }
 
 impl CommandExecutor for PluginListArgs {
-    async fn execute(self, _ctx: CommandContext) -> Result<()> {
+    async fn execute(self, ctx: CommandContext) -> Result<()> {
         let spec = system::detect();
 
         // Short-circuit on `--runtime`: when the user passes one explicitly we
@@ -77,7 +70,7 @@ impl CommandExecutor for PluginListArgs {
                 .features
                 .contains(&crate::system::spec::CpuFeature::AVX);
 
-        let assets = match fetch_release_assets(&runtime).await {
+        let assets = match ctx.client.github_release_assets(&runtime).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, tag = %runtime, "failed to fetch plugin release assets");
@@ -138,13 +131,10 @@ impl CommandExecutor for PluginListArgs {
                 };
                 for probe in probes {
                     for plat in &platform_candidates {
-                        let url_targz = format!(
-                            "{WASMEDGE_RELEASE_BASE_URL}/{runtime}/{ASSET_PREFIX}{probe}-{runtime}-{plat}{TAR_GZ}"
-                        );
-                        let url_zip = format!(
-                            "{WASMEDGE_RELEASE_BASE_URL}/{runtime}/{ASSET_PREFIX}{probe}-{runtime}-{plat}{ZIP}"
-                        );
-                        let available = head_ok(&url_targz).await || head_ok(&url_zip).await;
+                        let url_targz = plugin_asset_url(probe, &runtime, plat, false)?;
+                        let url_zip = plugin_asset_url(probe, &runtime, plat, true)?;
+                        let available = ctx.client.head_ok(url_targz).await
+                            || ctx.client.head_ok(url_zip).await;
                         rows.push(Row {
                             name: probe.to_string(),
                             version: runtime.clone(),
@@ -236,90 +226,6 @@ fn order_plugins(a: &str, b: &str, cuda: bool, noavx: bool) -> Ordering {
     rank(a).cmp(&rank(b)).then(a.cmp(b))
 }
 
-async fn head_ok(url: &str) -> bool {
-    let client = reqwest::Client::new();
-    if let Ok(resp) = client.head(url).send().await {
-        if resp.status().is_success() {
-            return true;
-        }
-    }
-    if let Ok(resp) = client.get(url).send().await {
-        return resp.status().is_success();
-    }
-    false
-}
-
-#[derive(Debug, Clone)]
-struct AssetInfo {
-    plugin: String,
-    version: String,
-    platform: String,
-}
-
-async fn fetch_release_assets(tag: &str) -> Result<Vec<AssetInfo>> {
-    use snafu::ResultExt;
-
-    let url = format!("{WASMEDGE_GH_RELEASE_TAG_API}/{tag}");
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(&url)
-        .header("User-Agent", UA)
-        .send()
-        .await
-        .context(RequestSnafu {
-            resource: "plugin release metadata",
-        })?;
-    // A 404 means the tag doesn't exist (or has no published assets) —
-    // degrade gracefully to an empty list. Other non-2xx statuses (403
-    // rate-limit, 5xx outage, etc.) propagate as errors so the caller can
-    // surface them to the user instead of silently reporting "no plugins".
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        tracing::debug!(tag, "release metadata 404 — tag has no published assets");
-        return Ok(Vec::new());
-    }
-    let resp = resp.error_for_status().context(RequestSnafu {
-        resource: "plugin release metadata",
-    })?;
-    let text = resp.text().await.context(RequestSnafu {
-        resource: "plugin release metadata body",
-    })?;
-    let v: Value = serde_json::from_str(&text).context(JsonSnafu {
-        resource: "plugin release metadata",
-    })?;
-    let mut out = Vec::new();
-    if let Some(arr) = v.get("assets").and_then(|a| a.as_array()) {
-        for a in arr {
-            let name = a.get("name").and_then(|s| s.as_str()).unwrap_or("");
-            if !name.starts_with(ASSET_PREFIX) {
-                continue;
-            }
-            if let Some(info) = parse_asset_name(name, tag) {
-                out.push(AssetInfo {
-                    plugin: info.0,
-                    version: info.1,
-                    platform: info.2,
-                });
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn parse_asset_name(name: &str, tag: &str) -> Option<(String, String, String)> {
-    let rest = name.strip_prefix(ASSET_PREFIX)?;
-    let needle = format!("-{tag}-");
-    if let Some(idx) = rest.find(&needle) {
-        let plugin = &rest[..idx];
-        let plat_with_ext = &rest[idx + needle.len()..];
-        let platform = plat_with_ext
-            .strip_suffix(TAR_GZ)
-            .or_else(|| plat_with_ext.strip_suffix(ZIP))
-            .unwrap_or(plat_with_ext);
-        return Some((plugin.to_string(), tag.to_string(), platform.to_string()));
-    }
-    None
-}
-
 pub fn platform_fallbacks(primary: &str, runtime: &str) -> Vec<String> {
     let rt_ge_015 = runtime_ge_015(runtime);
     let mut out = vec![primary.to_string()];
@@ -337,73 +243,4 @@ pub fn platform_fallbacks(primary: &str, runtime: &str) -> Vec<String> {
     out.sort();
     out.dedup();
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_asset_name_targz() {
-        let parsed = parse_asset_name(
-            "WasmEdge-plugin-wasi_nn-ggml-0.15.0-manylinux_2_28_x86_64.tar.gz",
-            "0.15.0",
-        );
-        assert_eq!(
-            parsed,
-            Some((
-                "wasi_nn-ggml".to_string(),
-                "0.15.0".to_string(),
-                "manylinux_2_28_x86_64".to_string(),
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_asset_name_zip() {
-        let parsed = parse_asset_name(
-            "WasmEdge-plugin-wasi_crypto-0.14.1-windows_x86_64.zip",
-            "0.14.1",
-        );
-        assert_eq!(
-            parsed,
-            Some((
-                "wasi_crypto".to_string(),
-                "0.14.1".to_string(),
-                "windows_x86_64".to_string(),
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_asset_name_rejects_unrelated_prefix() {
-        let parsed = parse_asset_name("WasmEdge-0.15.0-linux.tar.gz", "0.15.0");
-        assert_eq!(parsed, None);
-    }
-
-    #[test]
-    fn parse_asset_name_rejects_tag_mismatch() {
-        // The needle "-0.15.0-" is not present in an archive tagged 0.14.1.
-        let parsed = parse_asset_name(
-            "WasmEdge-plugin-wasi_nn-ggml-0.14.1-manylinux2014_x86_64.tar.gz",
-            "0.15.0",
-        );
-        assert_eq!(parsed, None);
-    }
-
-    #[test]
-    fn parse_asset_name_plugin_name_may_contain_dashes() {
-        let parsed = parse_asset_name(
-            "WasmEdge-plugin-wasi-logging-0.15.0-darwin_arm64.tar.gz",
-            "0.15.0",
-        );
-        assert_eq!(
-            parsed,
-            Some((
-                "wasi-logging".to_string(),
-                "0.15.0".to_string(),
-                "darwin_arm64".to_string(),
-            ))
-        );
-    }
 }

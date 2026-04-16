@@ -8,7 +8,8 @@ use std::{
 use crate::{
     constants::{
         CHECKSUM_FILE_NAME, DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_REQUEST_TIMEOUT_SECS,
-        DOWNLOAD_BUFFER_SIZE, WASMEDGE_GIT_URL, WASMEDGE_RELEASE_BASE_URL,
+        DOWNLOAD_BUFFER_SIZE, WASMEDGE_GH_RELEASE_TAG_API, WASMEDGE_GIT_URL,
+        WASMEDGE_RELEASE_BASE_URL,
     },
     http::HttpClientConfig,
     prelude::*,
@@ -80,7 +81,7 @@ impl WasmEdgeApiClient {
         let named = NamedTempFile::new_in(tmpdir)?;
         let mut async_file = OpenOptions::new().write(true).open(named.path()).await?;
 
-        download_asset(no_progress, response, &mut async_file).await?;
+        stream_response_to_file(no_progress, response, &mut async_file).await?;
         drop(async_file);
 
         Ok(named)
@@ -172,6 +173,103 @@ impl WasmEdgeApiClient {
         file.rewind()?;
         Ok(())
     }
+
+    /// Download `url` to the file at `to`, streaming chunks and optionally
+    /// showing a progress bar. The target file is created or truncated; its
+    /// parent directory must already exist.
+    ///
+    /// `resource` is the label used in any [`Error::Request`] surfaced from
+    /// this call — pass something descriptive of *what* the caller is
+    /// downloading (e.g. `"plugin download"`) so user-facing errors stay
+    /// specific instead of collapsing every download into a generic label.
+    pub async fn download_to_path(
+        &self,
+        url: Url,
+        to: &Path,
+        no_progress: bool,
+        resource: &'static str,
+    ) -> Result<()> {
+        tracing::debug!(%url, target = %to.display(), %resource, "Starting download to path");
+
+        let client = self.http_client()?;
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .context(RequestSnafu { resource })?
+            .error_for_status()
+            .context(RequestSnafu { resource })?;
+
+        let mut async_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(to)
+            .await?;
+        stream_response_to_file(no_progress, response, &mut async_file).await?;
+        Ok(())
+    }
+
+    /// Fetch plugin asset metadata from the GitHub Releases API for `tag`.
+    ///
+    /// A 404 (tag doesn't exist or has no published assets) yields an empty
+    /// Vec rather than an error — callers treat "no assets" and "tag not
+    /// found" the same way. Other non-2xx statuses (403 rate-limit, 5xx
+    /// outage, etc.) and JSON parse failures are surfaced as typed errors.
+    pub async fn github_release_assets(&self, tag: &str) -> Result<Vec<PluginAssetInfo>> {
+        let url = format!("{WASMEDGE_GH_RELEASE_TAG_API}/{tag}");
+        let client = self.http_client()?;
+        let resp = client.get(&url).send().await.context(RequestSnafu {
+            resource: "plugin release metadata",
+        })?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            tracing::debug!(tag, "release metadata 404 — tag has no published assets");
+            return Ok(Vec::new());
+        }
+        let resp = resp.error_for_status().context(RequestSnafu {
+            resource: "plugin release metadata",
+        })?;
+        let text = resp.text().await.context(RequestSnafu {
+            resource: "plugin release metadata body",
+        })?;
+        let v: serde_json::Value = serde_json::from_str(&text).context(JsonSnafu {
+            resource: "plugin release metadata",
+        })?;
+        let mut out = Vec::new();
+        if let Some(arr) = v.get("assets").and_then(|a| a.as_array()) {
+            for a in arr {
+                let name = a.get("name").and_then(|s| s.as_str()).unwrap_or("");
+                if !name.starts_with(PLUGIN_ASSET_PREFIX) {
+                    continue;
+                }
+                if let Some((plugin, version, platform)) = parse_plugin_asset_name(name, tag) {
+                    out.push(PluginAssetInfo {
+                        plugin,
+                        version,
+                        platform,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Returns `true` if `url` responds with a successful status to HEAD
+    /// (or GET, as a fallback for servers that disallow HEAD).
+    pub async fn head_ok(&self, url: Url) -> bool {
+        let Ok(client) = self.http_client() else {
+            return false;
+        };
+        if let Ok(resp) = client.head(url.clone()).send().await {
+            if resp.status().is_success() {
+                return true;
+            }
+        }
+        if let Ok(resp) = client.get(url).send().await {
+            return resp.status().is_success();
+        }
+        false
+    }
 }
 
 impl WasmEdgeApiClient {
@@ -200,7 +298,7 @@ impl Default for WasmEdgeApiClient {
 }
 
 #[tracing::instrument(level = tracing::Level::DEBUG, skip(response, target_file), fields(size = response.content_length()))]
-async fn download_asset(
+async fn stream_response_to_file(
     no_progress: bool,
     mut response: Response,
     target_file: &mut File,
@@ -372,6 +470,56 @@ pub fn runtime_ge_015(runtime: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// Metadata describing a single plugin release asset as published on
+/// GitHub's release API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginAssetInfo {
+    pub plugin: String,
+    pub version: String,
+    pub platform: String,
+}
+
+const PLUGIN_ASSET_PREFIX: &str = "WasmEdge-plugin-";
+const PLUGIN_TAR_GZ: &str = ".tar.gz";
+const PLUGIN_ZIP: &str = ".zip";
+
+/// Parse a plugin archive filename like
+/// `WasmEdge-plugin-wasi_nn-ggml-0.15.0-manylinux_2_28_x86_64.tar.gz` into
+/// `(plugin, version, platform)`. The `tag` parameter disambiguates where
+/// the plugin-name portion ends (since plugin names may themselves contain
+/// dashes, e.g. `wasi-logging`).
+fn parse_plugin_asset_name(name: &str, tag: &str) -> Option<(String, String, String)> {
+    let rest = name.strip_prefix(PLUGIN_ASSET_PREFIX)?;
+    let needle = format!("-{tag}-");
+    let idx = rest.find(&needle)?;
+    let plugin = &rest[..idx];
+    let plat_with_ext = &rest[idx + needle.len()..];
+    let platform = plat_with_ext
+        .strip_suffix(PLUGIN_TAR_GZ)
+        .or_else(|| plat_with_ext.strip_suffix(PLUGIN_ZIP))
+        .unwrap_or(plat_with_ext);
+    Some((plugin.to_string(), tag.to_string(), platform.to_string()))
+}
+
+/// Build the download URL for a plugin archive on GitHub releases.
+///
+/// Produces `{base}/{runtime}/WasmEdge-plugin-{plugin}-{runtime}-{platform}.{ext}`
+/// where `ext` is `.zip` when `is_zip` is `true`, else `.tar.gz`. Callers
+/// pick the extension themselves: the runtime installer maps it from the
+/// host OS (Windows → zip, others → tar.gz), but the `plugin list --all`
+/// probe builds *both* variants per host to discover whichever exists on
+/// the release.
+pub fn plugin_asset_url(plugin: &str, runtime: &str, platform: &str, is_zip: bool) -> Result<Url> {
+    let ext = if is_zip { "zip" } else { "tar.gz" };
+    let filename = format!("{PLUGIN_ASSET_PREFIX}{plugin}-{runtime}-{platform}.{ext}");
+    let mut url = Url::parse(WASMEDGE_RELEASE_BASE_URL)
+        .expect("WASMEDGE_RELEASE_BASE_URL must be a valid URL");
+    url.path_segments_mut()
+        .expect("base is valid URL")
+        .extend(&[runtime, &filename]);
+    Ok(url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +654,93 @@ mod tests {
         assert!(runtime_ge_015("1.0.0"));
         // Unparseable input fails open (defensive).
         assert!(runtime_ge_015("not-a-version"));
+    }
+
+    #[test]
+    fn parse_plugin_asset_name_targz() {
+        let parsed = parse_plugin_asset_name(
+            "WasmEdge-plugin-wasi_nn-ggml-0.15.0-manylinux_2_28_x86_64.tar.gz",
+            "0.15.0",
+        );
+        assert_eq!(
+            parsed,
+            Some((
+                "wasi_nn-ggml".to_string(),
+                "0.15.0".to_string(),
+                "manylinux_2_28_x86_64".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_plugin_asset_name_zip() {
+        let parsed = parse_plugin_asset_name(
+            "WasmEdge-plugin-wasi_crypto-0.14.1-windows_x86_64.zip",
+            "0.14.1",
+        );
+        assert_eq!(
+            parsed,
+            Some((
+                "wasi_crypto".to_string(),
+                "0.14.1".to_string(),
+                "windows_x86_64".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_plugin_asset_name_rejects_unrelated_prefix() {
+        assert_eq!(
+            parse_plugin_asset_name("WasmEdge-0.15.0-linux.tar.gz", "0.15.0"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_plugin_asset_name_rejects_tag_mismatch() {
+        // The needle "-0.15.0-" is not present in an archive tagged 0.14.1.
+        assert_eq!(
+            parse_plugin_asset_name(
+                "WasmEdge-plugin-wasi_nn-ggml-0.14.1-manylinux2014_x86_64.tar.gz",
+                "0.15.0"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_plugin_asset_name_handles_dashed_plugin_names() {
+        let parsed = parse_plugin_asset_name(
+            "WasmEdge-plugin-wasi-logging-0.15.0-darwin_arm64.tar.gz",
+            "0.15.0",
+        );
+        assert_eq!(
+            parsed,
+            Some((
+                "wasi-logging".to_string(),
+                "0.15.0".to_string(),
+                "darwin_arm64".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn plugin_asset_url_targz() {
+        let url = plugin_asset_url("wasi_nn-ggml", "0.15.0", "manylinux_2_28_x86_64", false)
+            .expect("url builds");
+        assert_eq!(
+            url.as_str(),
+            "https://github.com/WasmEdge/WasmEdge/releases/download/0.15.0/WasmEdge-plugin-wasi_nn-ggml-0.15.0-manylinux_2_28_x86_64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn plugin_asset_url_zip() {
+        let url =
+            plugin_asset_url("wasi_crypto", "0.14.1", "windows_x86_64", true).expect("url builds");
+        assert_eq!(
+            url.as_str(),
+            "https://github.com/WasmEdge/WasmEdge/releases/download/0.14.1/WasmEdge-plugin-wasi_crypto-0.14.1-windows_x86_64.zip"
+        );
     }
 }
