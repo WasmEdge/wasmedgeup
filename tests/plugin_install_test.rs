@@ -86,6 +86,7 @@ async fn run_plugin_install_smoke(no_verify: bool) {
     let client = WasmEdgeApiClient::default();
     let resolved_version = client
         .resolve_version(&version)
+        .await
         .expect("resolve latest failed");
 
     let specs = system::detect();

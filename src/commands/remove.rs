@@ -103,9 +103,13 @@ impl CommandExecutor for RemoveArgs {
             return Ok(());
         }
 
-        let version = ctx.client.resolve_version(&self.version).inspect_err(
-            |e| tracing::error!(error = %e.to_string(), "Failed to resolve version"),
-        )?;
+        let version = ctx
+            .client
+            .resolve_version(&self.version)
+            .await
+            .inspect_err(
+                |e| tracing::error!(error = %e.to_string(), "Failed to resolve version"),
+            )?;
         tracing::debug!(%version, "Resolved version for use");
 
         let version_dir = versions_dir.join(version.to_string());
