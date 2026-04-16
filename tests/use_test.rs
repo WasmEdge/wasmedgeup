@@ -1,4 +1,6 @@
 use std::path::Path;
+
+use serial_test::serial;
 use wasmedgeup::{
     api::{releases, ReleasesFilter, WasmEdgeApiClient},
     cli::{CommandContext, CommandExecutor},
@@ -10,6 +12,7 @@ mod test_utils;
 const WASM_EDGE_GIT_URL: &str = "https://github.com/WasmEdge/WasmEdge.git";
 
 #[tokio::test]
+#[serial]
 async fn test_use_version() {
     let (_tempdir, test_home) = test_utils::setup_test_environment();
 
@@ -48,6 +51,7 @@ async fn test_use_version() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_use_latest_version() {
     let (_tempdir, test_home) = test_utils::setup_test_environment();
 
@@ -84,6 +88,7 @@ async fn test_use_latest_version() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_use_nonexistent_version() {
     let (_tempdir, test_home) = test_utils::setup_test_environment();
 
