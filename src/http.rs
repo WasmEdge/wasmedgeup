@@ -1,3 +1,4 @@
+use crate::constants::{DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_REQUEST_TIMEOUT_SECS};
 use crate::prelude::*;
 use reqwest::Client;
 use std::time::Duration;
@@ -14,8 +15,8 @@ pub struct HttpClientConfig {
 impl Default for HttpClientConfig {
     fn default() -> Self {
         Self {
-            connect_timeout: 15, // 15 seconds for connection
-            request_timeout: 90, // 90 seconds for request
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT_SECS,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT_SECS,
         }
     }
 }
