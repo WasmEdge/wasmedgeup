@@ -160,15 +160,11 @@ fn parse_proc_cpuinfo() -> Result<ProcCpuInfo, String> {
                 let key = k.trim();
                 let val = v.trim();
                 match key {
-                    "vendor_id" | "CPU implementer" => {
-                        if vendor.is_none() {
-                            vendor = Some(val.to_string());
-                        }
+                    "vendor_id" | "CPU implementer" if vendor.is_none() => {
+                        vendor = Some(val.to_string());
                     }
-                    "model name" | "Hardware" => {
-                        if model.is_none() {
-                            model = Some(val.to_string());
-                        }
+                    "model name" | "Hardware" if model.is_none() => {
+                        model = Some(val.to_string());
                     }
                     "physical id" => {
                         physical_ids.insert(val.to_string());
