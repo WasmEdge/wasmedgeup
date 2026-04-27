@@ -2,7 +2,6 @@ use std::str::FromStr;
 
 use semver::Version;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum PluginVersion {
     Name(String),

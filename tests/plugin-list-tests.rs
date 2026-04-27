@@ -1,8 +1,9 @@
+use semver::Version;
 use serde_json::Value;
 use wasmedgeup::{
     api::runtime_ge_015,
     commands::plugin::list::platform_fallbacks,
-    system::{self, plugins::platform_key_from_specs},
+    system::{self, plugins::plugin_platform_key},
 };
 
 const ASSET_PREFIX: &str = "WasmEdge-plugin-";
@@ -50,11 +51,12 @@ fn test_platform_fallbacks_manylinux2014_with_new_runtime() {
 #[tokio::test]
 async fn test_github_assets_list_contains_expected_platform() {
     let spec = system::detect();
-    let platform = platform_key_from_specs(&spec.os).expect("platform key");
     let runtime = match system::toolchain::get_installed_wasmedge_version() {
         Ok(v) => v,
         Err(_) => "0.15.0".to_string(),
     };
+    let runtime_ver = Version::parse(&runtime).unwrap_or_else(|_| Version::new(0, 15, 0));
+    let platform = plugin_platform_key(&spec.os, &runtime_ver).expect("platform key");
     let url = format!("{GH_RELEASE_TAG_API}/{runtime}");
 
     let client = reqwest::Client::new();
