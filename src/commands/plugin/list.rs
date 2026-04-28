@@ -315,3 +315,72 @@ pub fn platform_fallbacks(primary: &str, runtime: &str) -> Vec<String> {
     out.dedup();
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_asset_name_targz() {
+        let parsed = parse_asset_name(
+            "WasmEdge-plugin-wasi_nn-ggml-0.15.0-manylinux_2_28_x86_64.tar.gz",
+            "0.15.0",
+        );
+        assert_eq!(
+            parsed,
+            Some((
+                "wasi_nn-ggml".to_string(),
+                "0.15.0".to_string(),
+                "manylinux_2_28_x86_64".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_asset_name_zip() {
+        let parsed = parse_asset_name(
+            "WasmEdge-plugin-wasi_crypto-0.14.1-windows_x86_64.zip",
+            "0.14.1",
+        );
+        assert_eq!(
+            parsed,
+            Some((
+                "wasi_crypto".to_string(),
+                "0.14.1".to_string(),
+                "windows_x86_64".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_asset_name_rejects_unrelated_prefix() {
+        let parsed = parse_asset_name("WasmEdge-0.15.0-linux.tar.gz", "0.15.0");
+        assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn parse_asset_name_rejects_tag_mismatch() {
+        // The needle "-0.15.0-" is not present in an archive tagged 0.14.1.
+        let parsed = parse_asset_name(
+            "WasmEdge-plugin-wasi_nn-ggml-0.14.1-manylinux2014_x86_64.tar.gz",
+            "0.15.0",
+        );
+        assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn parse_asset_name_plugin_name_may_contain_dashes() {
+        let parsed = parse_asset_name(
+            "WasmEdge-plugin-wasi-logging-0.15.0-darwin_arm64.tar.gz",
+            "0.15.0",
+        );
+        assert_eq!(
+            parsed,
+            Some((
+                "wasi-logging".to_string(),
+                "0.15.0".to_string(),
+                "darwin_arm64".to_string(),
+            ))
+        );
+    }
+}
