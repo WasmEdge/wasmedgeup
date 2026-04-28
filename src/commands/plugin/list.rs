@@ -1,5 +1,6 @@
 use crate::api::runtime_ge_015;
 use crate::cli::{CommandContext, CommandExecutor};
+use crate::constants::{WASMEDGE_GH_RELEASE_TAG_API, WASMEDGE_RELEASE_BASE_URL};
 use crate::prelude::*;
 use crate::system;
 use crate::system::plugins::plugin_platform_key;
@@ -9,8 +10,6 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 
 const UA: &str = "wasmedgeup";
-const GH_RELEASE_TAG_API: &str = "https://api.github.com/repos/WasmEdge/WasmEdge/releases/tags";
-const GH_RELEASE_DOWNLOAD_BASE: &str = "https://github.com/WasmEdge/WasmEdge/releases/download";
 const ASSET_PREFIX: &str = "WasmEdge-plugin-";
 const TAR_GZ: &str = ".tar.gz";
 const ZIP: &str = ".zip";
@@ -133,10 +132,10 @@ impl CommandExecutor for PluginListArgs {
                 for probe in probes {
                     for plat in &platform_candidates {
                         let url_targz = format!(
-                            "{GH_RELEASE_DOWNLOAD_BASE}/{runtime}/{ASSET_PREFIX}{probe}-{runtime}-{plat}{TAR_GZ}"
+                            "{WASMEDGE_RELEASE_BASE_URL}/{runtime}/{ASSET_PREFIX}{probe}-{runtime}-{plat}{TAR_GZ}"
                         );
                         let url_zip = format!(
-                            "{GH_RELEASE_DOWNLOAD_BASE}/{runtime}/{ASSET_PREFIX}{probe}-{runtime}-{plat}{ZIP}"
+                            "{WASMEDGE_RELEASE_BASE_URL}/{runtime}/{ASSET_PREFIX}{probe}-{runtime}-{plat}{ZIP}"
                         );
                         let available = head_ok(&url_targz).await || head_ok(&url_zip).await;
                         rows.push(Row {
@@ -251,7 +250,7 @@ struct AssetInfo {
 }
 
 async fn fetch_release_assets(tag: &str) -> Result<Vec<AssetInfo>, ()> {
-    let url = format!("{GH_RELEASE_TAG_API}/{tag}");
+    let url = format!("{WASMEDGE_GH_RELEASE_TAG_API}/{tag}");
     let client = reqwest::Client::new();
     let resp = client
         .get(&url)

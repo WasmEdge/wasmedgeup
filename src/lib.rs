@@ -1,6 +1,7 @@
 pub mod api;
 pub mod cli;
 pub mod commands;
+pub mod constants;
 pub mod error;
 pub mod fs;
 pub mod http;

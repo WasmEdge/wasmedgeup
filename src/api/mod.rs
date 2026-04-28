@@ -6,6 +6,10 @@ use std::{
 };
 
 use crate::{
+    constants::{
+        CHECKSUM_FILE_NAME, DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_REQUEST_TIMEOUT_SECS,
+        DOWNLOAD_BUFFER_SIZE, WASMEDGE_GIT_URL, WASMEDGE_RELEASE_BASE_URL,
+    },
     http::HttpClientConfig,
     prelude::*,
     target::{TargetArch, TargetOS},
@@ -33,12 +37,6 @@ pub struct WasmEdgeApiClient {
     pub request_timeout: u64,
 }
 
-const WASM_EDGE_GIT_URL: &str = "https://github.com/WasmEdge/WasmEdge.git";
-const WASM_EDGE_RELEASE_ASSET_BASE_URL: &str =
-    "https://github.com/WasmEdge/WasmEdge/releases/download";
-const CHECKSUM_FILE_NAME: &str = "SHA256SUM";
-const BUFFER_SIZE: usize = 8 * 1024; // 8KB
-
 impl WasmEdgeApiClient {
     fn http_client(&self) -> Result<Client> {
         HttpClientConfig::new()
@@ -48,12 +46,12 @@ impl WasmEdgeApiClient {
     }
 
     pub fn releases(&self, filter: ReleasesFilter, num_releases: usize) -> Result<Vec<Version>> {
-        let releases = releases::get_all(WASM_EDGE_GIT_URL, filter)?;
+        let releases = releases::get_all(WASMEDGE_GIT_URL, filter)?;
         Ok(releases.into_iter().take(num_releases).collect())
     }
 
     pub fn latest_release(&self) -> Result<Version> {
-        let releases = releases::get_all(WASM_EDGE_GIT_URL, ReleasesFilter::Stable)?;
+        let releases = releases::get_all(WASMEDGE_GIT_URL, ReleasesFilter::Stable)?;
         releases.into_iter().next().ok_or(Error::Unknown)
     }
 
@@ -89,8 +87,8 @@ impl WasmEdgeApiClient {
     }
 
     pub async fn get_release_checksum(&self, version: &Version, asset: &Asset) -> Result<String> {
-        let mut url = Url::parse(WASM_EDGE_RELEASE_ASSET_BASE_URL)
-            .expect("WASM_EDGE_RELEASE_ASSET_BASE_URL must be a valid URL");
+        let mut url = Url::parse(WASMEDGE_RELEASE_BASE_URL)
+            .expect("WASMEDGE_RELEASE_BASE_URL must be a valid URL");
 
         url.path_segments_mut()
             .expect("base is valid URL")
@@ -153,7 +151,7 @@ impl WasmEdgeApiClient {
 
     pub async fn verify_file_checksum(file: &mut std::fs::File, expected: &str) -> Result<()> {
         let mut hasher = Sha256::new();
-        let mut buffer = vec![0; BUFFER_SIZE];
+        let mut buffer = vec![0; DOWNLOAD_BUFFER_SIZE];
 
         loop {
             let count = file.read(&mut buffer)?;
@@ -179,8 +177,8 @@ impl WasmEdgeApiClient {
 impl WasmEdgeApiClient {
     pub fn new() -> Self {
         Self {
-            connect_timeout: 15, // 15 seconds for connection
-            request_timeout: 90, // 90 seconds for request
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT_SECS,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT_SECS,
         }
     }
 
@@ -254,8 +252,8 @@ impl Asset {
     }
 
     pub fn url(&self) -> Result<Url> {
-        let mut url = Url::parse(WASM_EDGE_RELEASE_ASSET_BASE_URL)
-            .expect("WASM_EDGE_RELEASE_ASSET_BASE_URL must be a valid URL");
+        let mut url = Url::parse(WASMEDGE_RELEASE_BASE_URL)
+            .expect("WASMEDGE_RELEASE_BASE_URL must be a valid URL");
 
         url.path_segments_mut()
             .expect("base is valid URL")

@@ -4,6 +4,7 @@ use clap::{value_parser, Args};
 use tokio::fs;
 use walkdir::WalkDir;
 
+use crate::constants::WASMEDGE_RELEASE_BASE_URL;
 use crate::system::plugins::plugin_platform_key;
 use crate::{
     cli::{CommandContext, CommandExecutor},
@@ -16,8 +17,6 @@ use crate::{
 
 use super::utils::find_plugin_shared_objects;
 use super::version::PluginVersion;
-
-const GH_RELEASE_DOWNLOAD_BASE: &str = "https://github.com/WasmEdge/WasmEdge/releases/download";
 
 #[derive(Debug, Args)]
 pub struct PluginInstallArgs {
@@ -112,7 +111,7 @@ impl CommandExecutor for PluginInstallArgs {
             let ext = if is_windows { "zip" } else { "tar.gz" };
             let url = format!(
                 "{base}/{ver}/WasmEdge-plugin-{name}-{ver}-{os_key}.{ext}",
-                base = GH_RELEASE_DOWNLOAD_BASE,
+                base = WASMEDGE_RELEASE_BASE_URL,
                 name = name,
                 ver = pver,
                 os_key = os_key,
