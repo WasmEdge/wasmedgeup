@@ -10,6 +10,7 @@ use wasmedgeup::{
 };
 
 mod test_utils;
+use serial_test::serial;
 use test_utils::setup_test_environment;
 
 async fn execute_runtime_install(version: String, install_dir: &Path, tmpdir: &TempDir) {
@@ -65,6 +66,7 @@ use wasmedgeup::system::plugins::plugin_platform_key;
 use wasmedgeup::target::TargetOS;
 
 #[tokio::test]
+#[serial]
 async fn test_plugin_install_latest_runtime() {
     let tmpdir = tempdir().unwrap();
     let install_dir = tmpdir.path().join("install_target");

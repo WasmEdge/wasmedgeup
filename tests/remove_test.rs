@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use serial_test::serial;
 use wasmedgeup::{
     api::{latest_installed_version, WasmEdgeApiClient},
     cli::{CommandContext, CommandExecutor},
@@ -10,6 +11,7 @@ use wasmedgeup::{
 mod test_utils;
 
 #[tokio::test]
+#[serial]
 async fn test_remove_single_version() {
     let (_tempdir, test_home) = test_utils::setup_test_environment();
 
@@ -32,6 +34,7 @@ async fn test_remove_single_version() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_remove_multiple_versions() {
     let (_tempdir, test_home) = test_utils::setup_test_environment();
 
@@ -87,6 +90,7 @@ async fn test_remove_multiple_versions() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_remove_all_versions() {
     let (_tempdir, test_home) = test_utils::setup_test_environment();
 
@@ -115,6 +119,7 @@ async fn test_remove_all_versions() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_remove_nonexistent_version() {
     let (_tempdir, test_home) = test_utils::setup_test_environment();
 

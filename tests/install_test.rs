@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use semver::Version as SemVersion;
+use serial_test::serial;
 use tempfile::{tempdir, TempDir};
 use wasmedgeup::system;
 use wasmedgeup::{
@@ -75,6 +76,7 @@ async fn execute_install_test(
 }
 
 #[tokio::test]
+#[serial]
 async fn test_install_latest_version() {
     let tmpdir = tempdir().unwrap();
     let install_dir = tmpdir.path().join("install_target");
@@ -92,6 +94,7 @@ async fn test_install_latest_version() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_install_prerelease_version() {
     let tmpdir = tempdir().unwrap();
     let install_dir = tmpdir.path().join("install_target");

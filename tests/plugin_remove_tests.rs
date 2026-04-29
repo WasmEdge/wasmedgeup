@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use serial_test::serial;
 use wasmedgeup::{
     api::WasmEdgeApiClient,
     cli::{CommandContext, CommandExecutor},
@@ -92,6 +93,7 @@ async fn setup_mock_runtime_with_plugins(root: &Path, version: &str, plugins: &[
 }
 
 #[tokio::test]
+#[serial]
 async fn test_plugin_remove_single() {
     let (_tmp, home) = test_utils::setup_test_environment();
     let version = "0.14.1";
@@ -116,6 +118,7 @@ async fn test_plugin_remove_single() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_plugin_remove_multiple_and_cleanup_empty_dir() {
     let (_tmp, home) = test_utils::setup_test_environment();
     let version = "0.15.0";
@@ -147,6 +150,7 @@ async fn test_plugin_remove_multiple_and_cleanup_empty_dir() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_plugin_remove_nonexistent_is_noop() {
     let (_tmp, home) = test_utils::setup_test_environment();
     let version = "0.14.1";
@@ -167,6 +171,7 @@ async fn test_plugin_remove_nonexistent_is_noop() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_plugin_remove_when_no_plugin_dir() {
     let (_tmp, home) = test_utils::setup_test_environment();
     let version = "0.14.1";
