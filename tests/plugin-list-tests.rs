@@ -51,10 +51,8 @@ fn test_platform_fallbacks_manylinux2014_with_new_runtime() {
 #[tokio::test]
 async fn test_github_assets_list_contains_expected_platform() {
     let spec = system::detect();
-    let runtime = match system::toolchain::get_installed_wasmedge_version() {
-        Ok(v) => v,
-        Err(_) => "0.15.0".to_string(),
-    };
+    let runtime =
+        system::toolchain::get_installed_wasmedge_version().unwrap_or_else(|| "0.15.0".to_string());
     let runtime_ver = Version::parse(&runtime).unwrap_or_else(|_| Version::new(0, 15, 0));
     let platform = plugin_platform_key(&spec.os, &runtime_ver).expect("platform key");
     let url = format!("{GH_RELEASE_TAG_API}/{runtime}");

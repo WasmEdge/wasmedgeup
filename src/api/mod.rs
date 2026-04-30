@@ -52,7 +52,7 @@ impl WasmEdgeApiClient {
 
     pub fn latest_release(&self) -> Result<Version> {
         let releases = releases::get_all(WASMEDGE_GIT_URL, ReleasesFilter::Stable)?;
-        releases.into_iter().next().ok_or(Error::Unknown)
+        releases.into_iter().next().ok_or(Error::NoReleasesFound)
     }
 
     pub fn resolve_version(&self, version: &str) -> Result<Version> {

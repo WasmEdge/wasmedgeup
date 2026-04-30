@@ -223,10 +223,10 @@ impl UnixShell for Bash {
 pub struct Zsh;
 
 impl Zsh {
-    fn zdotdir() -> Result<PathBuf> {
+    fn zdotdir() -> Option<PathBuf> {
         match std::env::var("ZDOTDIR") {
-            Ok(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
-            _ => Err(Error::Unknown),
+            Ok(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+            _ => None,
         }
     }
 }
@@ -239,7 +239,7 @@ impl UnixShell for Zsh {
 
     fn potential_rc_paths(&self) -> Vec<PathBuf> {
         let home_env = std::env::var("HOME").ok().map(PathBuf::from);
-        [Zsh::zdotdir().ok(), home_env]
+        [Zsh::zdotdir(), home_env]
             .iter()
             .filter_map(|dir| dir.as_ref().map(|p| p.join(".zshenv")))
             .collect()
