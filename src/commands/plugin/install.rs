@@ -4,7 +4,7 @@ use clap::{value_parser, Args};
 use tokio::fs;
 use walkdir::WalkDir;
 
-use crate::api::plugin_asset_url;
+use crate::api::{plugin_archive_name, plugin_asset_url, WasmEdgeApiClient};
 use crate::system::plugins::plugin_platform_key;
 use crate::{
     cli::{CommandContext, CommandExecutor},
@@ -33,6 +33,13 @@ pub struct PluginInstallArgs {
     /// Set the install location for the WasmEdge runtime (defaults to $HOME/.wasmedge)
     #[arg(short, long)]
     pub path: Option<PathBuf>,
+
+    /// Skip checksum retrieval and verification for the downloaded plugin archive.
+    ///
+    /// This option disables integrity verification against the release-level
+    /// SHA256SUM file.
+    #[arg(long)]
+    pub no_verify: bool,
 }
 
 impl PluginInstallArgs {
@@ -92,26 +99,36 @@ impl CommandExecutor for PluginInstallArgs {
         }
 
         let specs = system::detect();
-        let os_key = plugin_platform_key(&specs.os, &runtime_version)?;
-        tracing::debug!(platform_key = %os_key, "Resolved plugin platform key for plugins");
-
         let dest_plugin = version_dir.join("plugin");
         fs::create_dir_all(&dest_plugin).await?;
 
+        // Windows ships zip archives; other platforms ship tar.gz. The local
+        // boolean is named for the *archive format* (what the call sites
+        // actually need) rather than the host OS.
+        let is_zip = matches!(specs.os.os_type, crate::target::TargetOS::Windows);
+
         let tmp_root = self.tmpdir();
         for plugin in &self.plugins {
-            let (name, pver) = match plugin {
-                PluginVersion::Name(n) => (n.as_str(), runtime_version.to_string()),
-                PluginVersion::NameAndVersion(n, v) => (n.as_str(), v.to_string()),
+            // Keep the plugin's own version typed: when the user passes
+            // `plugin@version`, the version may differ from `runtime_version`
+            // and `plugin_platform_key` is version-aware (manylinux2014 vs
+            // manylinux_2_28 boundary at 0.15). Computing os_key against the
+            // runtime once would build wrong URLs for `plugin@<older>`
+            // installs.
+            let (name, pver_semver) = match plugin {
+                PluginVersion::Name(n) => (n.as_str(), runtime_version.clone()),
+                PluginVersion::NameAndVersion(n, v) => (n.as_str(), v.clone()),
             };
+            let pver = pver_semver.to_string();
+            let os_key = plugin_platform_key(&specs.os, &pver_semver)?;
+            tracing::debug!(%name, %pver, platform_key = %os_key, "Resolved plugin asset platform key");
 
-            let is_windows = matches!(specs.os.os_type, crate::target::TargetOS::Windows);
-            let url = plugin_asset_url(name, &pver, &os_key, is_windows)?;
+            let url = plugin_asset_url(name, &pver, &os_key, is_zip)?;
             tracing::debug!(%name, %pver, %url, "Downloading plugin");
 
             let workspace = tmp_root.join(format!("{name}-{pver}"));
             fs::create_dir_all(&workspace).await?;
-            let archive_path = if is_windows {
+            let archive_path = if is_zip {
                 workspace.join("plugin.zip")
             } else {
                 workspace.join("plugin.tar.gz")
@@ -129,6 +146,23 @@ impl CommandExecutor for PluginInstallArgs {
                     path: archive_path.display().to_string(),
                     source,
                 })?;
+
+            if self.no_verify {
+                tracing::warn!(plugin = %name, "Skipping plugin checksum verification due to --no-verify flag");
+            } else {
+                let archive_name = plugin_archive_name(name, &pver, &os_key, is_zip);
+                let expected = ctx
+                    .client
+                    .get_archive_checksum(&pver, &archive_name)
+                    .await
+                    .inspect_err(
+                        |e| tracing::error!(error = %e, "Failed to get plugin checksum"),
+                    )?;
+                tracing::debug!(plugin = %name, checksum = %expected, "Got plugin checksum");
+                WasmEdgeApiClient::verify_file_checksum(&mut file, &expected).await?;
+                tracing::debug!(plugin = %name, "Plugin checksum verified");
+            }
+
             wfs::extract_archive(&mut file, &workspace).await?;
 
             let paths = find_plugin_shared_objects(&workspace);
