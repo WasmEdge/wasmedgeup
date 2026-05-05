@@ -1,3 +1,13 @@
+## 0.1.4 (2026-05-05)
+
+### Features
+
+- verify SHA256 checksum on plugin install (#268)
+
+### Fixes
+
+- resolve 'latest' against locally installed versions (#266)
+
 ## 0.1.3 (2026-02-11)
 
 ### Features
