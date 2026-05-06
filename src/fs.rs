@@ -334,32 +334,40 @@ fn create_symlink_windows(target: &Path, link: &Path, is_dir: bool) -> Result<()
     })
 }
 
-/// Extracts the contents of a compressed archive (`.tar.gz` for Unix-like systems, `.zip` for Windows) to a specified directory.
-///
-/// # Arguments
-///
-/// * `file` - A file object representing the compressed archive. This file must be opened in read mode.
-/// * `dest` - The destination directory to which the contents will be extracted.
-///
-/// # Errors
-///
-/// Returns an error if the extraction fails. This could happen if the archive format is unsupported or
-/// if the destination path cannot be created.
-pub async fn extract_archive(file: &mut std::fs::File, dest: &Path) -> Result<()> {
+/// Extract a compressed archive (`.tar.gz` on Unix, `.zip` on Windows) to
+/// `dest`. The file ownership is consumed because the synchronous
+/// extraction runs on a blocking worker via [`tokio::task::spawn_blocking`],
+/// so the tokio main runtime stays free to make progress on other async
+/// tasks while tar/zip decoding proceeds (unpacking a ~80MB runtime bundle
+/// can take seconds).
+pub async fn extract_archive(file: std::fs::File, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest).await.inspect_err(
         |e| tracing::error!(error = %e.to_string(), "Failed to create directory during extraction"),
     )?;
+
+    let dest_buf = dest.to_path_buf();
+    match tokio::task::spawn_blocking(move || extract_archive_blocking(file, &dest_buf)).await {
+        Ok(inner) => inner,
+        Err(join_err) => Err(Error::Io {
+            action: "archive extraction task".to_string(),
+            path: dest.display().to_string(),
+            source: crate::error::join_err_to_io_error(join_err),
+        }),
+    }
+}
+
+fn extract_archive_blocking(mut file: std::fs::File, dest: &Path) -> Result<()> {
     file.rewind()?;
 
     #[cfg(unix)]
     {
         use flate2::read::GzDecoder;
-        let decompressed = GzDecoder::new(file);
+        let decompressed = GzDecoder::new(&mut file);
         extract_tar(decompressed, dest)?;
     }
 
     #[cfg(windows)]
-    extract_zip(file, dest)?;
+    extract_zip(&mut file, dest)?;
 
     Ok(())
 }

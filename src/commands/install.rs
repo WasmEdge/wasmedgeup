@@ -73,9 +73,13 @@ impl CommandExecutor for InstallArgs {
     /// or copying issues.
     #[tracing::instrument(name = "install", skip_all, fields(version = self.version))]
     async fn execute(mut self, ctx: CommandContext) -> Result<()> {
-        let version = ctx.client.resolve_version(&self.version).inspect_err(
-            |e| tracing::error!(error = %e.to_string(), "Failed to resolve version"),
-        )?;
+        let version = ctx
+            .client
+            .resolve_version(&self.version)
+            .await
+            .inspect_err(
+                |e| tracing::error!(error = %e.to_string(), "Failed to resolve version"),
+            )?;
         tracing::debug!(%version, "Resolved version for installation");
 
         let os = self.os.get_or_insert_default();
@@ -126,7 +130,7 @@ impl CommandExecutor for InstallArgs {
         }
 
         tracing::debug!(dest = %tmpdir.display(), "Starting extraction of asset");
-        crate::fs::extract_archive(&mut file, &tmpdir)
+        crate::fs::extract_archive(file, &tmpdir)
             .await
             .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to extract asset"))?;
         tracing::debug!(dest = %tmpdir.display(), "Extraction completed successfully");

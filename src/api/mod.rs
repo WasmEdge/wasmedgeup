@@ -46,19 +46,29 @@ impl WasmEdgeApiClient {
             .build()
     }
 
-    pub fn releases(&self, filter: ReleasesFilter, num_releases: usize) -> Result<Vec<Version>> {
-        let releases = releases::get_all(WASMEDGE_GIT_URL, filter)?;
+    /// Fetch the first `num_releases` WasmEdge versions from the upstream git
+    /// remote. The underlying `git2::Remote::connect` call is blocking; we run
+    /// it on `spawn_blocking` so the tokio worker stays free.
+    pub async fn releases(
+        &self,
+        filter: ReleasesFilter,
+        num_releases: usize,
+    ) -> Result<Vec<Version>> {
+        let releases = fetch_releases_blocking(filter).await?;
         Ok(releases.into_iter().take(num_releases).collect())
     }
 
-    pub fn latest_release(&self) -> Result<Version> {
-        let releases = releases::get_all(WASMEDGE_GIT_URL, ReleasesFilter::Stable)?;
+    /// Fetch the newest stable WasmEdge release via a `spawn_blocking` wrapper
+    /// around the blocking git2 remote call.
+    pub async fn latest_release(&self) -> Result<Version> {
+        let releases = fetch_releases_blocking(ReleasesFilter::Stable).await?;
         releases.into_iter().next().ok_or(Error::NoReleasesFound)
     }
 
-    pub fn resolve_version(&self, version: &str) -> Result<Version> {
+    /// Parse `version` as semver, or resolve `"latest"` via `latest_release`.
+    pub async fn resolve_version(&self, version: &str) -> Result<Version> {
         if version == "latest" {
-            self.latest_release()
+            self.latest_release().await
         } else {
             Version::parse(version).context(SemVerSnafu {})
         }
@@ -488,6 +498,23 @@ pub fn runtime_ge_015(runtime: &str) -> bool {
     semver::Version::parse(runtime)
         .map(|v| v >= semver::Version::new(0, 15, 0))
         .unwrap_or(true)
+}
+
+/// Run the synchronous git2-based release enumeration on a blocking worker.
+///
+/// `releases::get_all` internally calls `git2::Remote::connect` and
+/// `Remote::list`, both of which perform blocking network I/O. Running them
+/// on the tokio runtime directly would stall other async tasks for the
+/// duration of the git protocol handshake, so we hop to a blocking thread.
+async fn fetch_releases_blocking(filter: ReleasesFilter) -> Result<Vec<Version>> {
+    match tokio::task::spawn_blocking(move || releases::get_all(WASMEDGE_GIT_URL, filter)).await {
+        Ok(inner) => inner,
+        Err(join_err) => Err(Error::Io {
+            action: "release-enumeration task".to_string(),
+            path: WASMEDGE_GIT_URL.to_string(),
+            source: crate::error::join_err_to_io_error(join_err),
+        }),
+    }
 }
 
 /// Metadata describing a single plugin release asset as published on

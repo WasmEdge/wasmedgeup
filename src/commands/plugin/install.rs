@@ -163,7 +163,7 @@ impl CommandExecutor for PluginInstallArgs {
                 tracing::debug!(plugin = %name, "Plugin checksum verified");
             }
 
-            wfs::extract_archive(&mut file, &workspace).await?;
+            wfs::extract_archive(file, &workspace).await?;
 
             let paths = find_plugin_shared_objects(&workspace);
             let found_any = if !paths.is_empty() {

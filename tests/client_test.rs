@@ -82,7 +82,7 @@ fn test_latest_installed_version_prerelease() {
 #[tokio::test]
 async fn test_get_release_checksum() {
     let client = WasmEdgeApiClient::default();
-    let version = client.latest_release().unwrap();
+    let version = client.latest_release().await.unwrap();
     let mut args = InstallArgs {
         version: "latest".to_string(),
         path: None,
