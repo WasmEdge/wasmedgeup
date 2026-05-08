@@ -1,6 +1,5 @@
-use git2::{Direction, Remote, RemoteHead};
+use gix::remote::Direction;
 use semver::Version;
-use snafu::ResultExt as _;
 
 use crate::prelude::*;
 
@@ -19,28 +18,86 @@ impl ReleasesFilter {
     }
 }
 
-/// Get all releases sorted from newest to oldest.
+/// List every release tag advertised by the remote, sorted newest-first.
+///
+/// Performs a `git ls-remote`-style ref discovery against `url` using the
+/// pure-Rust `gix` stack (`rustls` for TLS). No objects are downloaded —
+/// we only consume the ref advertisement returned during the protocol
+/// handshake.
 pub fn get_all(url: &str, filter: ReleasesFilter) -> Result<Vec<Version>> {
-    let mut remote = Remote::create_detached(url).context(GitSnafu { resource: "remote" })?;
-    remote.connect(Direction::Fetch).context(GitSnafu {
+    // gix's high-level Connection API requires a repository handle, so we
+    // initialise an ephemeral bare repo skeleton in a tempdir. `init_bare`
+    // does write the empty repo metadata (HEAD, config, refs/, objects/)
+    // there; what we never write is any fetched object — `ref_map` only
+    // consumes the protocol's ref advertisement.
+    let temp = tempfile::tempdir().map_err(|e| Error::Io {
+        action: "create temp dir for git ls-remote".to_string(),
+        path: std::env::temp_dir().display().to_string(),
+        source: e,
+    })?;
+
+    // Use `Options::isolated()` so the repo handle does not load the user's
+    // `~/.gitconfig` or the system `/etc/gitconfig`. Without this, gix would
+    // honour `url.<base>.insteadOf` rewrites from those files and silently
+    // redirect our `https://…` URL to SSH or to a mirror — a regression
+    // versus `git2::Remote::create_detached`, which had no repo and so no
+    // config to consult.
+    let repo = gix::ThreadSafeRepository::init_opts(
+        temp.path(),
+        gix::create::Kind::Bare,
+        gix::create::Options::default(),
+        gix::open::Options::isolated(),
+    )
+    .map_err(|e| Error::Git {
+        source: Box::new(e),
+        resource: "init",
+    })?
+    .to_thread_local();
+
+    // `Tags::All` makes gix include `+refs/tags/*:refs/tags/*` in the
+    // effective refspecs, so the server advertises every tag — matching
+    // the unconditional behaviour of git2::Remote::list. Without this we
+    // would inherit the default `Tags::Included` mode, which omits tags
+    // not reachable from the remote's selected branch tips and would
+    // silently drop release tags that live on disconnected history.
+    let remote = repo
+        .remote_at(url)
+        .map_err(|e| Error::Git {
+            source: Box::new(e),
+            resource: "remote",
+        })?
+        .with_fetch_tags(gix::remote::fetch::Tags::All);
+
+    let connection = remote.connect(Direction::Fetch).map_err(|e| Error::Git {
+        source: Box::new(e),
         resource: "remote/connect",
     })?;
 
-    let list = remote.list().context(GitSnafu {
-        resource: "remote/list",
-    })?;
-    let mut heads = list
+    let (ref_map, _handshake) = connection
+        .ref_map(
+            gix::progress::Discard,
+            gix::remote::ref_map::Options::default(),
+        )
+        .map_err(|e| Error::Git {
+            source: Box::new(e),
+            resource: "remote/ref_map",
+        })?;
+
+    let mut heads: Vec<Version> = ref_map
+        .remote_refs
         .iter()
-        .filter_map(remote_head_to_version)
+        .filter_map(remote_ref_to_version)
         .filter(|version| filter.matches(version))
-        .collect::<Vec<_>>();
+        .collect();
     heads.sort_unstable_by(|a, b| b.cmp(a));
 
     Ok(heads)
 }
 
-fn remote_head_to_version(head: &'_ RemoteHead<'_>) -> Option<Version> {
-    parse_tag_ref(head.name())
+fn remote_ref_to_version(r: &gix::protocol::handshake::Ref) -> Option<Version> {
+    let (name_bstr, _target, _peeled) = r.unpack();
+    let name = std::str::from_utf8(name_bstr.as_ref()).ok()?;
+    parse_tag_ref(name)
 }
 
 /// Parse a fully-qualified ref name into a semver `Version` if it represents
