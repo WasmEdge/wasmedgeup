@@ -3,6 +3,8 @@ use crate::system::spec::OpenClDeviceSpec;
 use crate::system::spec::{AcceleratorSupport, CudaSpec, GpuSpec, GpuVendor};
 #[cfg(unix)]
 use crate::system::spec::{OpenClDeviceSpec, RocmSpec};
+use crate::system::which_bin;
+#[cfg(unix)]
 use std::path::PathBuf;
 
 #[cfg(unix)]
@@ -38,12 +40,12 @@ pub fn detect_gpu() -> (Vec<GpuSpec>, AcceleratorSupport, Vec<String>, Vec<Strin
     let mut errors = Vec::new();
 
     #[cfg(unix)]
-    let nvidia_smi = which("nvidia-smi");
+    let nvidia_smi = which_bin("nvidia-smi");
     #[cfg(unix)]
-    let rocminfo = which("rocminfo");
+    let rocminfo = which_bin("rocminfo");
     #[cfg(unix)]
-    let clinfo = which("clinfo");
-    let vulkaninfo = which("vulkaninfo");
+    let clinfo = which_bin("clinfo");
+    let vulkaninfo = which_bin("vulkaninfo");
 
     let mut gpus: Vec<GpuSpec> = Vec::new();
 
@@ -242,19 +244,6 @@ fn vendor_from_str(s: &str) -> GpuVendor {
     } else {
         GpuVendor::Other
     }
-}
-
-fn which(bin: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).find_map(|p| {
-            let candidate = p.join(bin);
-            if candidate.exists() {
-                Some(candidate)
-            } else {
-                None
-            }
-        })
-    })
 }
 
 #[cfg(unix)]

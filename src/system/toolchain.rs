@@ -1,5 +1,5 @@
 use crate::system::spec::{LibcKind, ToolchainSpec};
-use std::path::PathBuf;
+use crate::system::which_bin;
 use std::process::Command;
 
 pub fn detect_toolchain(
@@ -9,36 +9,17 @@ pub fn detect_toolchain(
     let notes = Vec::new();
     let errors = Vec::new();
 
-    let nvidia_smi_path = which("nvidia-smi");
-    let nvcc_path = which("nvcc");
-    let rocminfo_path = which("rocminfo");
-    let clinfo_path = which("clinfo");
-    let vulkaninfo_path = which("vulkaninfo");
-
     let toolchain = ToolchainSpec {
-        nvidia_smi_path,
-        nvcc_path,
-        rocminfo_path,
-        clinfo_path,
-        vulkaninfo_path,
+        nvidia_smi_path: which_bin("nvidia-smi"),
+        nvcc_path: which_bin("nvcc"),
+        rocminfo_path: which_bin("rocminfo"),
+        clinfo_path: which_bin("clinfo"),
+        vulkaninfo_path: which_bin("vulkaninfo"),
         libc_kind,
         libc_version,
     };
 
     (toolchain, notes, errors)
-}
-
-fn which(bin: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).find_map(|p| {
-            let candidate = p.join(bin);
-            if candidate.exists() {
-                Some(candidate)
-            } else {
-                None
-            }
-        })
-    })
 }
 
 /// Runs `wasmedge --version` and extracts the reported version string.
