@@ -40,9 +40,59 @@ pub fn get_all(url: &str, filter: ReleasesFilter) -> Result<Vec<Version>> {
 }
 
 fn remote_head_to_version(head: &'_ RemoteHead<'_>) -> Option<Version> {
-    let name = head.name().strip_prefix("refs/tags/")?;
+    parse_tag_ref(head.name())
+}
+
+/// Parse a fully-qualified ref name into a semver `Version` if it represents
+/// a release tag we recognise. Returns `None` for non-tag refs, peeled tags
+/// (`^{}` suffix), and tag names that don't parse as semver.
+fn parse_tag_ref(ref_name: &str) -> Option<Version> {
+    let name = ref_name.strip_prefix("refs/tags/")?;
     if name.ends_with("^{}") {
         return None;
     }
     Version::parse(name).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_simple_release_tag() {
+        let v = parse_tag_ref("refs/tags/0.14.1").unwrap();
+        assert_eq!(v, Version::new(0, 14, 1));
+    }
+
+    #[test]
+    fn parses_prerelease_tag() {
+        let v = parse_tag_ref("refs/tags/0.15.0-alpha.1").unwrap();
+        assert_eq!(v.major, 0);
+        assert_eq!(v.minor, 15);
+        assert_eq!(v.patch, 0);
+        assert_eq!(v.pre.as_str(), "alpha.1");
+    }
+
+    #[test]
+    fn rejects_peeled_tag() {
+        assert!(parse_tag_ref("refs/tags/0.14.1^{}").is_none());
+    }
+
+    #[test]
+    fn rejects_non_tag_ref() {
+        assert!(parse_tag_ref("refs/heads/master").is_none());
+        assert!(parse_tag_ref("HEAD").is_none());
+    }
+
+    #[test]
+    fn rejects_non_semver_tag() {
+        assert!(parse_tag_ref("refs/tags/not-a-version").is_none());
+        assert!(parse_tag_ref("refs/tags/v0.14.1").is_none());
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(parse_tag_ref("").is_none());
+        assert!(parse_tag_ref("refs/tags/").is_none());
+    }
 }
