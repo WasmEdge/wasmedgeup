@@ -85,6 +85,13 @@ pub enum Error {
     #[snafu(display("No WasmEdge releases were found"))]
     NoReleasesFound,
 
+    #[snafu(display(
+        "No installable stable WasmEdge release was found.\n\
+         The most recent stable tag(s) exist in git but their release assets are not yet published.\n\
+         Retry shortly, or install a specific version with `wasmedgeup install <version>`."
+    ))]
+    NoPublishedReleasesFound,
+
     #[snafu(display("No plugins specified for installation"))]
     NoPluginsSpecified,
 
@@ -152,6 +159,26 @@ pub(crate) fn join_err_to_io_error(join_err: tokio::task::JoinError) -> std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_published_releases_found_renders_without_indentation() {
+        // `\<newline>` drops the following indentation; keep it that way.
+        let msg = Error::NoPublishedReleasesFound.to_string();
+        for (i, line) in msg.lines().enumerate() {
+            assert!(
+                !line.starts_with(' ') && !line.starts_with('\t'),
+                "line {i} of NoPublishedReleasesFound display unexpectedly indented: {line:?}",
+            );
+        }
+        assert!(
+            msg.contains("Retry shortly"),
+            "actionable hint missing from message: {msg:?}",
+        );
+        assert!(
+            msg.contains("`wasmedgeup install <version>`"),
+            "actionable hint missing from message: {msg:?}",
+        );
+    }
 
     #[tokio::test]
     async fn join_err_to_io_extracts_str_panic_payload() {
