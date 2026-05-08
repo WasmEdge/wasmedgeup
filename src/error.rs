@@ -6,9 +6,9 @@ pub enum Error {
     #[snafu(display("Version {version} not found in wasmedge installation"))]
     VersionNotFound { version: String },
 
-    #[snafu(display("Unable to fetch resource '{}' for git", resource))]
+    #[snafu(display("Unable to fetch resource '{}' for git: {}", resource, source))]
     Git {
-        source: git2::Error,
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
         resource: &'static str,
     },
 
