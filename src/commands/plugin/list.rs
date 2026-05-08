@@ -1,8 +1,9 @@
-use crate::api::{plugin_asset_url, runtime_ge_015};
+use crate::api::{plugin_asset_url, runtime_ge_015, PluginAssetInfo, WasmEdgeApiClient};
 use crate::cli::{CommandContext, CommandExecutor};
 use crate::prelude::*;
 use crate::system;
 use crate::system::plugins::plugin_platform_key;
+use crate::system::spec::{CpuClass, CpuFeature, SystemSpec};
 use clap::Args;
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -27,126 +28,58 @@ pub struct PluginListArgs {
     name: Option<String>,
 }
 
+impl PluginListArgs {
+    /// Pick the runtime tag: explicit `--runtime` wins; otherwise we ask
+    /// `wasmedge --version` on PATH. Returns `RuntimeNotFound` if neither
+    /// source yields a value so the caller can surface an install hint.
+    ///
+    /// Takes `runtime_arg` by value to preserve the short-circuit
+    /// behaviour PR #265 fixed: passing `--runtime` must not pay for a
+    /// `wasmedge --version` subprocess spawn.
+    fn resolve_runtime_tag(runtime_arg: Option<String>) -> Result<String> {
+        if let Some(r) = runtime_arg {
+            return Ok(r);
+        }
+        match system::toolchain::get_installed_wasmedge_version() {
+            Some(v) => Ok(v),
+            None => {
+                eprintln!(
+                    "WasmEdge runtime not found. Install a runtime first \
+                    (e.g., wasmedgeup install 0.15.0)."
+                );
+                Err(Error::RuntimeNotFound)
+            }
+        }
+    }
+}
+
 impl CommandExecutor for PluginListArgs {
     async fn execute(self, ctx: CommandContext) -> Result<()> {
         let spec = system::detect();
+        let runtime = Self::resolve_runtime_tag(self.runtime)?;
+        let platform = resolve_platform_key(&runtime, &spec)?;
 
-        // Short-circuit on `--runtime`: when the user passes one explicitly we
-        // must not spawn `wasmedge --version`, otherwise an explicit-runtime
-        // call still pays for (and depends on) local toolchain detection.
-        let runtime = if let Some(r) = self.runtime {
-            r
-        } else {
-            match system::toolchain::get_installed_wasmedge_version() {
-                Some(v) => v,
-                None => {
-                    eprintln!(
-                        "WasmEdge runtime not found. Install a runtime first \
-                        (e.g., wasmedgeup install 0.15.0)."
-                    );
-                    return Err(Error::RuntimeNotFound);
-                }
-            }
-        };
-
-        let platform = match semver::Version::parse(&runtime) {
-            Ok(v) => match plugin_platform_key(&spec.os, &v) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("{e}");
-                    return Err(e);
-                }
-            },
-            Err(e) => {
-                eprintln!("Invalid runtime version '{runtime}' (expected semver like 0.15.0)");
-                return Err(Error::SemVer { source: e });
-            }
-        };
-
-        let cuda_hint = spec.accelerators.cuda_available;
-        let noavx_hint = matches!(spec.cpu.class, crate::system::spec::CpuClass::NoAvx)
-            || !spec
-                .cpu
-                .features
-                .contains(&crate::system::spec::CpuFeature::AVX);
-
-        let assets = match ctx.client.github_release_assets(&runtime).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, tag = %runtime, "failed to fetch plugin release assets");
-                eprintln!("failed to fetch release assets for tag {runtime}: {e}");
-                Vec::new()
-            }
-        };
-
-        let mut name_set: HashSet<String> = HashSet::new();
-        for a in &assets {
-            if a.version == runtime {
-                name_set.insert(a.plugin.clone());
-            }
-        }
-
-        let mut candidates: Vec<String> = name_set.into_iter().collect();
-
-        if let Some(filter) = &self.name {
-            candidates.retain(|p| p == filter);
-        }
-
-        candidates.sort_by(|a, b| order_plugins(a, b, cuda_hint, noavx_hint));
-
+        let hints = PluginHints::from_spec(&spec);
+        let assets = fetch_release_assets_or_warn(&ctx.client, &runtime).await;
+        let candidates = collect_plugin_candidates(&assets, &runtime, &hints, self.name.as_deref());
         let platform_candidates = platform_fallbacks(&platform, &runtime);
-        let mut rows: Vec<Row> = Vec::new();
 
-        for a in &assets {
-            if a.version != runtime {
-                continue;
-            }
-            if !platform_candidates.iter().any(|p| p == &a.platform) {
-                continue;
-            }
-            if let Some(filter) = &self.name {
-                if &a.plugin != filter {
-                    continue;
-                }
-            }
-            rows.push(Row {
-                name: a.plugin.clone(),
-                version: a.version.clone(),
-                status: "available".to_string(),
-            });
-        }
+        let mut rows = build_direct_rows(
+            &assets,
+            &runtime,
+            &platform_candidates,
+            self.name.as_deref(),
+        );
 
         if rows.is_empty() && self.all {
-            for name in &candidates {
-                let probes = if name == "wasi_nn-ggml" {
-                    if cuda_hint {
-                        vec!["wasi_nn-ggml-cuda", "wasi_nn-ggml"]
-                    } else if noavx_hint {
-                        vec!["wasi_nn-ggml-noavx", "wasi_nn-ggml"]
-                    } else {
-                        vec!["wasi_nn-ggml"]
-                    }
-                } else {
-                    vec![name.as_str()]
-                };
-                for probe in probes {
-                    for plat in &platform_candidates {
-                        let url_targz = plugin_asset_url(probe, &runtime, plat, false)?;
-                        let url_zip = plugin_asset_url(probe, &runtime, plat, true)?;
-                        let available = ctx.client.head_ok(url_targz).await
-                            || ctx.client.head_ok(url_zip).await;
-                        rows.push(Row {
-                            name: probe.to_string(),
-                            version: runtime.clone(),
-                            status: if available {
-                                format!("available ({plat})")
-                            } else {
-                                format!("not found ({plat})")
-                            },
-                        });
-                    }
-                }
-            }
+            rows = build_probe_rows(
+                &ctx.client,
+                &candidates,
+                &runtime,
+                &platform_candidates,
+                &hints,
+            )
+            .await?;
         }
 
         rows.sort_by(|a, b| match a.name.cmp(&b.name) {
@@ -154,44 +87,7 @@ impl CommandExecutor for PluginListArgs {
             other => other,
         });
 
-        println!("Runtime: {runtime}\nPlatform: {platform}");
-        if rows.is_empty() {
-            println!(
-                "\nNo plugins {} for this runtime/platform.",
-                if self.all {
-                    "(including missing entries)"
-                } else {
-                    "found"
-                }
-            );
-            return Ok(());
-        }
-        let name_w = 28usize;
-        let ver_w = 12usize;
-        println!(
-            "\n{:<name_w$} {:<ver_w$} STATUS",
-            "PLUGIN",
-            "VERSION",
-            name_w = name_w,
-            ver_w = ver_w
-        );
-        println!(
-            "{} {} {}",
-            "-".repeat(name_w),
-            "-".repeat(ver_w),
-            "-".repeat(40)
-        );
-        for r in rows {
-            println!(
-                "{:<name_w$} {:<ver_w$} {}",
-                r.name,
-                r.version,
-                r.status,
-                name_w = name_w,
-                ver_w = ver_w,
-            );
-        }
-
+        print_plugin_table(&rows, &runtime, &platform, self.all);
         Ok(())
     }
 }
@@ -201,6 +97,175 @@ struct Row {
     name: String,
     version: String,
     status: String,
+}
+
+/// Host hints that bias plugin ordering: the CUDA-first / noavx-preferred
+/// heuristics only make sense in context of the machine we're running on.
+struct PluginHints {
+    cuda: bool,
+    noavx: bool,
+}
+
+impl PluginHints {
+    fn from_spec(spec: &SystemSpec) -> Self {
+        let cuda = spec.accelerators.cuda_available;
+        let noavx = matches!(spec.cpu.class, CpuClass::NoAvx)
+            || !spec.cpu.features.contains(&CpuFeature::AVX);
+        Self { cuda, noavx }
+    }
+}
+
+/// Parse `runtime` as semver and compute the platform key for plugin
+/// archives; both failures print a user-facing message before returning.
+fn resolve_platform_key(runtime: &str, spec: &SystemSpec) -> Result<String> {
+    let v = semver::Version::parse(runtime).map_err(|source| {
+        eprintln!("Invalid runtime version '{runtime}' (expected semver like 0.15.0)");
+        Error::SemVer { source }
+    })?;
+    plugin_platform_key(&spec.os, &v).inspect_err(|e| eprintln!("{e}"))
+}
+
+/// Query GitHub's releases API; a failure is logged but not propagated —
+/// the command degrades gracefully to an empty list in that case.
+async fn fetch_release_assets_or_warn(
+    client: &WasmEdgeApiClient,
+    runtime: &str,
+) -> Vec<PluginAssetInfo> {
+    match client.github_release_assets(runtime).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, tag = %runtime, "failed to fetch plugin release assets");
+            eprintln!("failed to fetch release assets for tag {runtime}: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Distinct plugin names present in `assets` for `runtime`, filtered by
+/// `name_filter` when set, then sorted by [`order_plugins`] which biases
+/// toward hardware-appropriate ggml variants.
+fn collect_plugin_candidates(
+    assets: &[PluginAssetInfo],
+    runtime: &str,
+    hints: &PluginHints,
+    name_filter: Option<&str>,
+) -> Vec<String> {
+    let mut name_set: HashSet<String> = HashSet::new();
+    for a in assets {
+        if a.version == runtime {
+            name_set.insert(a.plugin.clone());
+        }
+    }
+    let mut candidates: Vec<String> = name_set.into_iter().collect();
+    if let Some(filter) = name_filter {
+        candidates.retain(|p| p == filter);
+    }
+    candidates.sort_by(|a, b| order_plugins(a, b, hints.cuda, hints.noavx));
+    candidates
+}
+
+/// Rows derived directly from GitHub asset metadata — no network
+/// speculation. An asset qualifies when its tag matches `runtime`, its
+/// platform appears in `platform_candidates`, and it passes the name filter.
+fn build_direct_rows(
+    assets: &[PluginAssetInfo],
+    runtime: &str,
+    platform_candidates: &[String],
+    name_filter: Option<&str>,
+) -> Vec<Row> {
+    assets
+        .iter()
+        .filter(|a| a.version == runtime)
+        .filter(|a| platform_candidates.contains(&a.platform))
+        .filter(|a| match name_filter {
+            Some(filter) => a.plugin == filter,
+            None => true,
+        })
+        .map(|a| Row {
+            name: a.plugin.clone(),
+            version: a.version.clone(),
+            status: "available".to_string(),
+        })
+        .collect()
+}
+
+/// When `--all` is set and no direct rows exist, probe speculative URLs
+/// (tar.gz + zip across every platform fallback) per candidate so the
+/// user sees which combinations exist and which don't.
+async fn build_probe_rows(
+    client: &WasmEdgeApiClient,
+    candidates: &[String],
+    runtime: &str,
+    platform_candidates: &[String],
+    hints: &PluginHints,
+) -> Result<Vec<Row>> {
+    let mut rows: Vec<Row> = Vec::new();
+    for name in candidates {
+        for probe in probes_for(name, hints) {
+            for plat in platform_candidates {
+                let url_targz = plugin_asset_url(probe, runtime, plat, false)?;
+                let url_zip = plugin_asset_url(probe, runtime, plat, true)?;
+                let available = client.head_ok(url_targz).await || client.head_ok(url_zip).await;
+                rows.push(Row {
+                    name: probe.to_string(),
+                    version: runtime.to_string(),
+                    status: if available {
+                        format!("available ({plat})")
+                    } else {
+                        format!("not found ({plat})")
+                    },
+                });
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// Which name variants to try for a given plugin base name. For the ggml
+/// plugin we prefer cuda or noavx variants when the host hints indicate
+/// they'd work better; other plugins just probe themselves.
+fn probes_for<'a>(name: &'a str, hints: &PluginHints) -> Vec<&'a str> {
+    if name == "wasi_nn-ggml" {
+        if hints.cuda {
+            vec!["wasi_nn-ggml-cuda", "wasi_nn-ggml"]
+        } else if hints.noavx {
+            vec!["wasi_nn-ggml-noavx", "wasi_nn-ggml"]
+        } else {
+            vec!["wasi_nn-ggml"]
+        }
+    } else {
+        vec![name]
+    }
+}
+
+fn print_plugin_table(rows: &[Row], runtime: &str, platform: &str, show_missing_hint: bool) {
+    const NAME_W: usize = 28;
+    const VER_W: usize = 12;
+    const STATUS_W: usize = 40;
+
+    println!("Runtime: {runtime}\nPlatform: {platform}");
+    if rows.is_empty() {
+        println!(
+            "\nNo plugins {} for this runtime/platform.",
+            if show_missing_hint {
+                "(including missing entries)"
+            } else {
+                "found"
+            }
+        );
+        return;
+    }
+
+    println!("\n{:<NAME_W$} {:<VER_W$} STATUS", "PLUGIN", "VERSION",);
+    println!(
+        "{} {} {}",
+        "-".repeat(NAME_W),
+        "-".repeat(VER_W),
+        "-".repeat(STATUS_W),
+    );
+    for r in rows {
+        println!("{:<NAME_W$} {:<VER_W$} {}", r.name, r.version, r.status,);
+    }
 }
 
 fn version_desc(a: &str, b: &str) -> Ordering {
