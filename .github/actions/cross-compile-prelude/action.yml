@@ -1,0 +1,21 @@
+name: Cross-compile prerequisites
+description: Install target-specific build prerequisites shared by the Rust CI and Release workflows. Keeps the two workflows from drifting on cross-compile setup.
+
+inputs:
+  target:
+    description: Build target triple (e.g. x86_64-unknown-linux-musl, aarch64-unknown-linux-gnu)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install musl-tools (x86_64-unknown-linux-musl)
+      if: inputs.target == 'x86_64-unknown-linux-musl'
+      shell: bash
+      run: sudo apt-get install -y musl-tools
+
+    - name: Setup cross-compilation toolchain (aarch64 Linux)
+      if: inputs.target == 'aarch64-unknown-linux-gnu' || inputs.target == 'aarch64-unknown-linux-musl'
+      uses: taiki-e/setup-cross-toolchain-action@129361238c06ff2cc1c4ca5c5d2217af441ffdf6 # v1
+      with:
+        target: ${{ inputs.target }}
