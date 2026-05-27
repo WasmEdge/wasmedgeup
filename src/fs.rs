@@ -476,6 +476,31 @@ fn extract_zip(file: &mut std::fs::File, to: &Path) -> Result<()> {
 pub async fn create_version_symlinks(base_dir: &Path, version: &str) -> Result<()> {
     let symlink_dirs = ["bin", "include", "lib", "plugin"];
 
+    // Preflight: refuse *before* mutating anything if any destination is a
+    // pre-existing real directory. `base_dir` is user-controlled (`--path`) and
+    // may point at a populated, non-WasmEdge location such as `/usr/local`;
+    // recursively removing `<base_dir>/<dir>` there would wipe directories like
+    // `/usr/local/bin`. Scanning up front keeps the refusal atomic: an earlier
+    // entry's symlink is never removed or re-pointed before a later real
+    // directory triggers the error. `symlink_metadata` does not follow links,
+    // so existing symlinks/files fall through to the mutation loop below.
+    for dir in symlink_dirs {
+        let symlink_path = base_dir.join(dir);
+        if let Ok(meta) = fs::symlink_metadata(&symlink_path).await {
+            if meta.file_type().is_dir() {
+                return InvalidPathSnafu {
+                    path: symlink_path.display().to_string(),
+                    reason: format!(
+                        "refusing to replace existing directory `{dir}` with a symlink; \
+                         remove it manually or choose a dedicated install path \
+                         (e.g. the default $HOME/.wasmedge install root)"
+                    ),
+                }
+                .fail();
+            }
+        }
+    }
+
     for dir in symlink_dirs {
         let symlink_path = base_dir.join(dir);
 
@@ -489,8 +514,10 @@ pub async fn create_version_symlinks(base_dir: &Path, version: &str) -> Result<(
 
             #[cfg(windows)]
             {
-                use tokio::fs::{remove_dir, remove_dir_all, remove_file};
+                use tokio::fs::{remove_dir, remove_file};
 
+                // A pre-existing real directory was already rejected by the
+                // preflight scan above, so the destination is a symlink or file.
                 if file_type.is_symlink() {
                     match remove_dir(&symlink_path).await {
                         Ok(_) => {}
@@ -501,11 +528,6 @@ pub async fn create_version_symlinks(base_dir: &Path, version: &str) -> Result<(
                             })?;
                         }
                     }
-                } else if file_type.is_dir() {
-                    remove_dir_all(&symlink_path).await.context(IoSnafu {
-                        path: symlink_path.display().to_string(),
-                        action: "remove existing directory before creating symlink".to_string(),
-                    })?;
                 } else {
                     remove_file(&symlink_path).await.context(IoSnafu {
                         path: symlink_path.display().to_string(),
@@ -516,15 +538,12 @@ pub async fn create_version_symlinks(base_dir: &Path, version: &str) -> Result<(
 
             #[cfg(unix)]
             {
+                // A pre-existing real directory was already rejected by the
+                // preflight scan above, so only replace symlinks or files.
                 if file_type.is_symlink() || file_type.is_file() {
                     fs::remove_file(&symlink_path).await.context(IoSnafu {
                         path: symlink_path.display().to_string(),
                         action: "remove old symlink".to_string(),
-                    })?;
-                } else if file_type.is_dir() {
-                    fs::remove_dir_all(&symlink_path).await.context(IoSnafu {
-                        path: symlink_path.display().to_string(),
-                        action: "remove existing directory before creating symlink".to_string(),
                     })?;
                 }
             }
@@ -624,6 +643,96 @@ mod tests {
         );
         let resolved = std::fs::read_link(&to_link).expect("dest should be a readable symlink");
         assert_eq!(resolved, real_target);
+    }
+
+    /// Security regression (unsafe symlink migration): `create_version_symlinks`
+    /// must never recursively delete a pre-existing *real* directory at
+    /// `<base_dir>/<dir>`. The original implementation called `remove_dir_all`
+    /// unconditionally, so `install`/`use --path /usr/local` against a
+    /// populated, non-WasmEdge directory would wipe `/usr/local/{bin,include,lib}`.
+    /// It must instead refuse with `Error::InvalidPath` and leave the existing
+    /// directory and its contents untouched.
+    #[tokio::test]
+    async fn create_version_symlinks_refuses_to_delete_existing_real_dir() {
+        let base = tempdir().unwrap();
+        let version = "0.15.0";
+
+        // The freshly-installed versioned payload the symlinks would point at.
+        for dir in ["bin", "include", "lib", "plugin"] {
+            std::fs::create_dir_all(base.path().join("versions").join(version).join(dir)).unwrap();
+        }
+
+        // A pre-existing, foreign real directory (think `/usr/local/bin`) whose
+        // contents must survive.
+        let preexisting_bin = base.path().join("bin");
+        std::fs::create_dir_all(&preexisting_bin).unwrap();
+        std::fs::write(preexisting_bin.join("do-not-delete"), "precious").unwrap();
+
+        let result = create_version_symlinks(base.path(), version).await;
+
+        assert!(
+            matches!(result, Err(Error::InvalidPath { .. })),
+            "expected an InvalidPath refusal, got {result:?}"
+        );
+        assert!(
+            preexisting_bin.join("do-not-delete").exists(),
+            "pre-existing directory contents must be preserved, not deleted"
+        );
+        let meta = std::fs::symlink_metadata(&preexisting_bin).unwrap();
+        assert!(
+            meta.file_type().is_dir(),
+            "pre-existing real directory must remain a real directory, not be replaced by a symlink"
+        );
+    }
+
+    /// Atomicity: the refusal must not mutate the filesystem at all. The loop
+    /// walks `["bin", "include", "lib", "plugin"]` in order, so a real
+    /// directory at a *later* entry must not leave an *earlier* symlink already
+    /// removed or re-pointed. Here `bin` is a pre-existing symlink (as a
+    /// previous install would leave it) and `include` is a foreign real
+    /// directory; the call must refuse without touching `bin`.
+    #[tokio::test]
+    async fn create_version_symlinks_refusal_does_not_mutate_earlier_entries() {
+        let base = tempdir().unwrap();
+        let version = "0.15.0";
+
+        for dir in ["bin", "include", "lib", "plugin"] {
+            std::fs::create_dir_all(base.path().join("versions").join(version).join(dir)).unwrap();
+        }
+
+        // `bin` is an existing symlink from a previous install. It points at an
+        // absolute target so any re-pointing by the loop (which would use the
+        // relative `versions/<version>/bin`) is detectable.
+        let old_target = base.path().join("old-bin");
+        std::fs::create_dir_all(&old_target).unwrap();
+        let bin_link = base.path().join("bin");
+        std::os::unix::fs::symlink(&old_target, &bin_link).unwrap();
+
+        // A later entry is a foreign real directory that must trigger refusal.
+        let preexisting_include = base.path().join("include");
+        std::fs::create_dir_all(&preexisting_include).unwrap();
+        std::fs::write(preexisting_include.join("do-not-delete"), "precious").unwrap();
+
+        let result = create_version_symlinks(base.path(), version).await;
+
+        assert!(
+            matches!(result, Err(Error::InvalidPath { .. })),
+            "expected an InvalidPath refusal, got {result:?}"
+        );
+        let link_meta = std::fs::symlink_metadata(&bin_link).unwrap();
+        assert!(
+            link_meta.file_type().is_symlink(),
+            "pre-existing `bin` symlink must remain a symlink after the refusal"
+        );
+        assert_eq!(
+            std::fs::read_link(&bin_link).unwrap(),
+            old_target,
+            "refusal must not re-point an earlier symlink (operation must be atomic)"
+        );
+        assert!(
+            preexisting_include.join("do-not-delete").exists(),
+            "pre-existing directory contents must be preserved"
+        );
     }
 }
 
