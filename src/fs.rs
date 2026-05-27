@@ -12,8 +12,74 @@ use std::path::Path;
 use std::os::windows::fs::{symlink_dir, symlink_file};
 
 use std::fs::OpenOptions;
+use tempfile::{Builder, TempDir};
 use tokio::fs;
 use walkdir::WalkDir;
+
+/// Create an isolated temporary workspace with an unpredictable name under
+/// `base`.
+///
+/// Staging an install in a deterministic `base/<install_name>` directory
+/// created with `create_dir_all` is unsafe on a shared temp filesystem: a
+/// local attacker can predict that path and pre-create it (or symlink it
+/// elsewhere) before a privileged install, redirecting download and extract
+/// writes outside the intended boundary (CWE-59 / CWE-377). The guarantee
+/// `tempfile` provides is an *exclusive* directory create: `tempdir_in` issues
+/// a `mkdir`-style create that fails with `EEXIST` and retries a fresh name, so
+/// a directory or symlink an attacker pre-creates at the chosen path is never
+/// adopted or followed. The randomized name is defense-in-depth that makes the
+/// path hard to guess in the first place — but note `tempfile`'s RNG is not
+/// cryptographic, so the safety rests on the exclusive create, not on secrecy
+/// of the name (don't replace this with a predictable name + plain
+/// `create_dir_all`). The returned [`TempDir`] removes itself on drop, cleaning
+/// up even when a later install step fails.
+pub fn create_temp_workspace(base: &Path, install_name: &str) -> Result<TempDir> {
+    // `install_name` is used verbatim as the tempfile name prefix, which
+    // `tempdir_in` joins onto `base`. Anything other than a single *normal*
+    // path component would let the workspace be created outside `base`
+    // (plugin names are unvalidated user input), defeating the containment
+    // this helper provides, so require exactly one normal component. A bare
+    // separator check is not enough: `../../evil` escapes via `..`, and on
+    // Windows a drive-relative prefix like `C:evil` (which
+    // `std::path::is_separator` does *not* flag) makes `base.join(..)` discard
+    // `base` entirely. Reject all of those rather than silently escaping the
+    // staging boundary.
+    let mut components = Path::new(install_name).components();
+    let is_single_normal_component = matches!(
+        components.next(),
+        Some(std::path::Component::Normal(name)) if name == std::ffi::OsStr::new(install_name)
+    ) && components.next().is_none();
+    if !is_single_normal_component {
+        return Err(Error::InvalidPath {
+            path: install_name.to_string(),
+            reason: "temp workspace name must be a single path component".to_string(),
+        });
+    }
+
+    std::fs::create_dir_all(base).map_err(|source| Error::Io {
+        action: "create temp workspace base directory".to_string(),
+        path: base.display().to_string(),
+        source,
+    })?;
+
+    let prefix = format!("{install_name}-");
+    let mut builder = Builder::new();
+    builder.prefix(&prefix);
+    // Stage privileged, not-yet-verified downloads in a private directory so
+    // other local users on a shared temp filesystem cannot read them; tempfile
+    // otherwise creates the workspace with the process umask (typically 0755).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let workspace = builder.tempdir_in(base).map_err(|source| Error::Io {
+        action: "create temp workspace".to_string(),
+        path: base.display().to_string(),
+        source,
+    })?;
+    Ok(workspace)
+}
 
 pub fn can_write_to_directory(path: &Path) -> bool {
     let test_file = path.join(".wasmedgeup_write_test");
@@ -558,5 +624,141 @@ mod tests {
         );
         let resolved = std::fs::read_link(&to_link).expect("dest should be a readable symlink");
         assert_eq!(resolved, real_target);
+    }
+}
+
+#[cfg(test)]
+mod temp_workspace_tests {
+    use super::*;
+
+    /// A local attacker on a shared temp filesystem can predict the legacy
+    /// workspace path (`<base>/<install_name>`) and pre-create it before a
+    /// privileged install to redirect download/extract writes (CWE-59 /
+    /// CWE-377). Each call must instead yield a fresh, unique directory that
+    /// never reuses that predictable path.
+    #[test]
+    fn temp_workspace_is_unpredictable_and_not_reused() {
+        let base = tempfile::tempdir().unwrap();
+        let install_name = "WasmEdge-0.14.1-Linux";
+
+        // Simulate an attacker pre-creating the predictable path.
+        let predictable = base.path().join(install_name);
+        std::fs::create_dir_all(&predictable).unwrap();
+
+        let ws1 = create_temp_workspace(base.path(), install_name).unwrap();
+        let ws2 = create_temp_workspace(base.path(), install_name).unwrap();
+
+        assert_ne!(ws1.path(), predictable.as_path());
+        assert_ne!(ws2.path(), predictable.as_path());
+        assert_ne!(ws1.path(), ws2.path());
+        assert!(ws1.path().starts_with(base.path()));
+        assert!(ws1.path().is_dir());
+        assert_eq!(std::fs::read_dir(ws1.path()).unwrap().count(), 0);
+    }
+
+    /// CWE-59 regression: when an attacker pre-creates the legacy predictable
+    /// path (`<base>/<install_name>`) as a symlink into a directory they
+    /// control, the helper must neither use nor follow it. The defense is that
+    /// the workspace is staged under a fresh randomized sibling created with an
+    /// exclusive `mkdir`, so the planted symlink is never on the write path.
+    /// This test pins that: the returned workspace is a real directory distinct
+    /// from the symlink, the symlink is left intact (not followed or clobbered
+    /// — a predictable-path regression would do one of those), and an actual
+    /// write lands inside `base` rather than leaking through into the attacker's
+    /// directory.
+    #[cfg(unix)]
+    #[test]
+    fn temp_workspace_write_is_contained_despite_precreated_symlink() {
+        let base = tempfile::tempdir().unwrap();
+        let attacker_target = tempfile::tempdir().unwrap();
+        let install_name = "WasmEdge-0.14.1-Linux";
+
+        let predictable = base.path().join(install_name);
+        std::os::unix::fs::symlink(attacker_target.path(), &predictable).unwrap();
+
+        let ws = create_temp_workspace(base.path(), install_name).unwrap();
+
+        // The helper must avoid the predictable path entirely: a different path
+        // AND a still-intact symlink prove it neither adopted nor followed it
+        // (the latter would have replaced the symlink with a real directory).
+        assert_ne!(ws.path(), predictable.as_path());
+        assert!(
+            std::fs::symlink_metadata(&predictable)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the planted symlink at the legacy path must be left untouched"
+        );
+
+        let staged = ws.path().join("payload");
+        std::fs::write(&staged, b"runtime bytes").unwrap();
+
+        let base_canon = base.path().canonicalize().unwrap();
+        let attacker_canon = attacker_target.path().canonicalize().unwrap();
+        let ws_canon = ws.path().canonicalize().unwrap();
+
+        assert!(ws_canon.starts_with(&base_canon));
+        assert!(!ws_canon.starts_with(&attacker_canon));
+        assert!(staged.canonicalize().unwrap().starts_with(&base_canon));
+        assert_eq!(
+            std::fs::read_dir(attacker_target.path()).unwrap().count(),
+            0,
+            "write leaked through the pre-created symlink into the attacker's directory"
+        );
+    }
+
+    /// `create_temp_workspace` must create `base` (and any missing parents) on
+    /// first use: the real plugin staging root (`<temp>/wasmedgeup/plugins`)
+    /// usually does not exist on a fresh machine, so the helper has to
+    /// materialize it. A regression dropping the `create_dir_all(base)` step
+    /// would still pass the tests above (which pass an already-existing `base`)
+    /// yet break the first-ever install with ENOENT from `tempdir_in`.
+    #[test]
+    fn temp_workspace_creates_missing_base() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("wasmedgeup").join("plugins");
+        assert!(!base.exists());
+
+        let ws = create_temp_workspace(&base, "wasi_nn-0.14.1").unwrap();
+
+        assert!(base.is_dir());
+        assert!(ws.path().starts_with(&base));
+        assert!(ws.path().is_dir());
+    }
+
+    /// Plugin names are unvalidated user input (`PluginVersion` only splits on
+    /// `@`), and the name is used verbatim as the tempfile prefix that
+    /// `tempdir_in` joins onto `base`. A name that is not a single normal path
+    /// component would otherwise create the workspace outside the staging root,
+    /// so the helper must reject every such escape: a path separator
+    /// (`../../evil`), a `.`/`..` element, and — on Windows — a drive-relative
+    /// prefix like `C:evil` that `std::path::is_separator` would miss.
+    #[test]
+    fn temp_workspace_rejects_non_component_names() {
+        let base = tempfile::tempdir().unwrap();
+
+        for bad in ["../../evil", "..", ".", "a/b", "trailing/"] {
+            let err = create_temp_workspace(base.path(), bad).unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidPath { .. }),
+                "expected InvalidPath for {bad:?}, got {err:?}"
+            );
+        }
+
+        // A drive-relative prefix has no separator but still escapes `base` on
+        // Windows (`base.join("C:evil-...")` discards `base`); it must be
+        // rejected there. On Unix `:` is an ordinary filename character, so the
+        // same string is a legitimate single component and stays accepted.
+        #[cfg(windows)]
+        {
+            let err = create_temp_workspace(base.path(), "C:evil").unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidPath { .. }),
+                "expected InvalidPath for a drive-relative name, got {err:?}"
+            );
+        }
+
+        // A normal single-component name is still accepted.
+        assert!(create_temp_workspace(base.path(), "wasi_nn-0.14.1").is_ok());
     }
 }
