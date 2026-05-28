@@ -88,6 +88,9 @@ pub enum Error {
     #[snafu(display("No plugins specified for installation"))]
     NoPluginsSpecified,
 
+    #[snafu(display("No plugin shared object was installed for '{plugin}' {version}: the archive contained no usable shared object, or every copy failed"))]
+    PluginNotInstalled { plugin: String, version: String },
+
     #[cfg(windows)]
     #[snafu(display("Error: Cannot create symbolic links.\n\nTo enable symlink creation on Windows:\n  1. Run as Administrator, or\n  2. Enable Developer Mode:\n     - Open Windows Settings\n     - Update & Security > For developers\n     - Enable 'Developer Mode'\n"))]
     WindowsSymlinkError { version: String },

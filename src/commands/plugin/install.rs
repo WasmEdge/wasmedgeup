@@ -43,12 +43,19 @@ pub struct PluginInstallArgs {
 }
 
 impl PluginInstallArgs {
-    fn tmpdir(&self) -> PathBuf {
-        self.tmpdir
-            .clone()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("wasmedgeup")
-            .join("plugins")
+    /// Parent directory under which the per-run randomized staging root is
+    /// created.
+    ///
+    /// Deliberately *not* a predictable subdirectory such as the former
+    /// `<temp>/wasmedgeup/plugins`: `create_dir_all` would follow a symlink a
+    /// local attacker pre-plants at that guessable path, redirecting a
+    /// privileged download/extract outside the temp root (CWE-59). Returning
+    /// the bare (trusted, OS-managed) temp dir — or the user's `--tmpdir` —
+    /// means the only directory created here is the randomized, exclusively
+    /// created root from `create_temp_workspace`, which an attacker cannot
+    /// pre-create.
+    fn staging_parent(&self) -> PathBuf {
+        self.tmpdir.clone().unwrap_or_else(std::env::temp_dir)
     }
 }
 
@@ -107,7 +114,13 @@ impl CommandExecutor for PluginInstallArgs {
         // actually need) rather than the host OS.
         let is_zip = matches!(specs.os.os_type, crate::target::TargetOS::Windows);
 
-        let tmp_root = self.tmpdir();
+        // One exclusive, randomized root per run holds every plugin's staging
+        // directory. It is created directly under the trusted temp dir (not a
+        // predictable path), so a local attacker cannot pre-plant a symlink to
+        // redirect staging. It is removed when `plugins_root` is dropped at the
+        // end of this method or on any early return.
+        let staging_parent = self.staging_parent();
+        let plugins_root = wfs::create_temp_workspace(&staging_parent, "wasmedgeup-plugins")?;
         for plugin in &self.plugins {
             // Keep the plugin's own version typed: when the user passes
             // `plugin@version`, the version may differ from `runtime_version`
@@ -126,12 +139,13 @@ impl CommandExecutor for PluginInstallArgs {
             let url = plugin_asset_url(name, &pver, &os_key, is_zip)?;
             tracing::debug!(%name, %pver, %url, "Downloading plugin");
 
-            let workspace = tmp_root.join(format!("{name}-{pver}"));
-            fs::create_dir_all(&workspace).await?;
+            let workspace =
+                wfs::create_temp_workspace(plugins_root.path(), &format!("{name}-{pver}"))?;
+            let workspace_dir = workspace.path();
             let archive_path = if is_zip {
-                workspace.join("plugin.zip")
+                workspace_dir.join("plugin.zip")
             } else {
-                workspace.join("plugin.tar.gz")
+                workspace_dir.join("plugin.tar.gz")
             };
 
             ctx.client
@@ -163,47 +177,47 @@ impl CommandExecutor for PluginInstallArgs {
                 tracing::debug!(plugin = %name, "Plugin checksum verified");
             }
 
-            wfs::extract_archive(file, &workspace).await?;
+            wfs::extract_archive(file, workspace_dir).await?;
 
-            let paths = find_plugin_shared_objects(&workspace);
-            let found_any = if !paths.is_empty() {
-                for src in paths {
-                    let file_name = src.file_name().unwrap_or_default();
-                    let dest = dest_plugin.join(file_name);
-                    if let Some(parent) = dest.parent() {
-                        if let Err(e) = fs::create_dir_all(parent).await {
-                            tracing::warn!(error = %e, path = %parent.display(), "Failed to create parent directory for plugin");
-                        }
-                    }
-                    if let Err(e) = fs::copy(&src, &dest).await {
-                        tracing::warn!(error = %e, from = %src.display(), to = %dest.display(), "Failed to copy plugin shared object");
-                    } else {
-                        tracing::debug!(from = %src.display(), to = %dest.display(), "Copied plugin shared object");
-                    }
-                }
-                true
-            } else {
-                false
-            };
+            let paths = find_plugin_shared_objects(workspace_dir);
+            let copied = copy_plugin_shared_objects(&paths, &dest_plugin).await;
 
-            if !found_any {
+            if copied == 0 {
+                // Nothing landed in `dest_plugin` — either the archive held no
+                // usable shared object or every copy failed. List the archive
+                // contents to aid diagnosis, then fail instead of reporting a
+                // bogus success. `workspace` (a `TempDir`) is dropped on return,
+                // cleaning up the staging directory.
                 let mut entries: Vec<String> = Vec::new();
-                for e in WalkDir::new(&workspace).into_iter().filter_map(|e| e.ok()) {
+                for e in WalkDir::new(workspace_dir)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
                     let p = e.path();
                     if p.is_file() {
-                        let rel = p.strip_prefix(&workspace).unwrap_or(p);
+                        let rel = p.strip_prefix(workspace_dir).unwrap_or(p);
                         entries.push(rel.display().to_string());
                     }
                 }
-                tracing::warn!(
-                    root = %workspace.display(),
+                tracing::error!(
+                    plugin = %name,
+                    root = %workspace_dir.display(),
                     entries = ?entries,
-                    "No plugin shared object found in archive; nothing was installed"
+                    "No plugin shared object was installed; archive contents listed for diagnosis"
                 );
+                return Err(Error::PluginNotInstalled {
+                    plugin: name.to_string(),
+                    version: pver.clone(),
+                });
             }
 
-            if let Err(e) = fs::remove_dir_all(&workspace).await {
-                tracing::debug!(error = %e, path = %workspace.display(), "Failed to cleanup workspace");
+            // The shared objects are already copied into `dest_plugin`, so a
+            // cleanup failure must not abort the remaining plugins. Mirror
+            // install.rs and surface it via `close()` rather than letting
+            // `TempDir`'s Drop swallow the error silently.
+            let workspace_path = workspace_dir.to_path_buf();
+            if let Err(e) = workspace.close() {
+                tracing::warn!(error = %e, plugin = %name, path = %workspace_path.display(), "Failed to clean up plugin workspace; continuing");
             }
 
             tracing::info!(plugin = %name, version = %pver, "Installed plugin successfully");
@@ -225,5 +239,108 @@ pub(super) fn select_runtime_version(
         None => Err(Error::VersionNotFound {
             version: "<none installed>".to_string(),
         }),
+    }
+}
+
+/// Copy each discovered plugin shared object in `paths` into `dest_plugin`,
+/// returning how many were copied successfully. Per-object failures are logged
+/// and counted as failures (not aborts) so one unreadable file does not lose
+/// the rest; the caller treats a zero return as "nothing was installed" rather
+/// than reporting a false success.
+async fn copy_plugin_shared_objects(paths: &[PathBuf], dest_plugin: &Path) -> usize {
+    let mut copied = 0usize;
+    for src in paths {
+        let file_name = src.file_name().unwrap_or_default();
+        let dest = dest_plugin.join(file_name);
+        if let Some(parent) = dest.parent() {
+            if let Err(e) = fs::create_dir_all(parent).await {
+                tracing::warn!(error = %e, path = %parent.display(), "Failed to create parent directory for plugin");
+                continue;
+            }
+        }
+        match fs::copy(src, &dest).await {
+            Ok(_) => {
+                copied += 1;
+                tracing::debug!(from = %src.display(), to = %dest.display(), "Copied plugin shared object");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, from = %src.display(), to = %dest.display(), "Failed to copy plugin shared object");
+            }
+        }
+    }
+    copied
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staging_parent_has_no_predictable_subdir() {
+        // The staging parent must be the bare temp dir, with no attacker-
+        // guessable subdirectory (e.g. `wasmedgeup/plugins`) that could be
+        // pre-symlinked; the randomized root created inside it via
+        // `create_temp_workspace` provides containment instead.
+        let default = PluginInstallArgs {
+            plugins: vec![],
+            tmpdir: None,
+            runtime: None,
+            path: None,
+            no_verify: false,
+        };
+        assert_eq!(default.staging_parent(), std::env::temp_dir());
+
+        // An explicit --tmpdir is honored verbatim (no subdir appended).
+        let custom = PathBuf::from("/custom/tmp");
+        let overridden = PluginInstallArgs {
+            plugins: vec![],
+            tmpdir: Some(custom.clone()),
+            runtime: None,
+            path: None,
+            no_verify: false,
+        };
+        assert_eq!(overridden.staging_parent(), custom);
+    }
+
+    #[tokio::test]
+    async fn copy_plugin_objects_counts_only_successful_copies() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let a = src_dir.path().join("liba.so");
+        let b = src_dir.path().join("libb.so");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+
+        let copied = copy_plugin_shared_objects(&[a, b], dest.path()).await;
+
+        assert_eq!(copied, 2);
+        assert!(dest.path().join("liba.so").exists());
+        assert!(dest.path().join("libb.so").exists());
+    }
+
+    #[tokio::test]
+    async fn copy_plugin_objects_returns_zero_when_every_copy_fails() {
+        let dest = tempfile::tempdir().unwrap();
+        // Discovery found a candidate, but its source does not exist so the
+        // copy fails. Pre-fix this still reported "Installed successfully"
+        // because the count came from candidates, not successful copies.
+        let missing = dest.path().join("missing-src").join("libplugin.so");
+
+        let copied = copy_plugin_shared_objects(std::slice::from_ref(&missing), dest.path()).await;
+
+        assert_eq!(copied, 0);
+    }
+
+    #[tokio::test]
+    async fn copy_plugin_objects_counts_partial_success() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let good = src_dir.path().join("libgood.so");
+        std::fs::write(&good, b"ok").unwrap();
+        let missing = src_dir.path().join("libmissing.so"); // never created
+
+        let copied = copy_plugin_shared_objects(&[good, missing], dest.path()).await;
+
+        assert_eq!(copied, 1);
     }
 }

@@ -88,19 +88,19 @@ impl CommandExecutor for InstallArgs {
 
         let asset = Asset::new(&version, os, arch);
 
-        // Create a dedicated temporary workspace for this installation. This provides isolation
-        // between concurrent installations and ensures consistent handling of different archive
-        // structures. The source path for copying will be either:
-        //   - /tmp/WasmEdge-version-os/ (for archives with root-level files)
-        //   - /tmp/WasmEdge-version-os/WasmEdge-version-os/ (for nested archives)
-        let tmpdir = self
-            .tmpdir
-            .unwrap_or_else(default_tmpdir)
-            .join(&asset.install_name);
-        fs::create_dir_all(&tmpdir).await.inspect_err(
-            |e| tracing::error!(error = %e.to_string(), "Failed to create temporary directory"),
-        )?;
-        tracing::debug!(tmpdir = %tmpdir.display(), "Created temporary directory");
+        // Stage this installation in an isolated temporary workspace with a
+        // randomized name (see `create_temp_workspace`) for isolation between
+        // concurrent installs and consistent handling of archive structures.
+        // The source path for copying is either:
+        //   - <workspace>/ (for archives with root-level files)
+        //   - <workspace>/WasmEdge-<version>-<os>/ (for nested archives)
+        let tmpbase = self.tmpdir.unwrap_or_else(default_tmpdir);
+        let workspace = crate::fs::create_temp_workspace(&tmpbase, &asset.install_name)
+            .inspect_err(
+                |e| tracing::error!(error = %e.to_string(), "Failed to create temporary workspace"),
+            )?;
+        let tmpdir = workspace.path().to_path_buf();
+        tracing::debug!(tmpdir = %tmpdir.display(), "Created temporary workspace directory");
 
         let mut file = ctx
             .client
@@ -204,10 +204,12 @@ impl CommandExecutor for InstallArgs {
         crate::fs::copy_tree(&source_dir, &version_dir).await?;
         tracing::debug!(version_dir = %version_dir.display(), "Copying files to version directory completed");
 
-        fs::remove_dir_all(&tmpdir).await.inspect_err(
-            |e| tracing::error!(error = %e.to_string(), "Failed to clean up temporary directory"),
-        )?;
-        tracing::debug!(tmpdir = %tmpdir.display(), "Cleaned up temporary directory");
+        // The runtime is already copied into `version_dir`, so failing to remove
+        // the staging workspace must not abort the install or skip the symlink/
+        // PATH setup below. Log and continue, leaving the dir for the temp reaper.
+        if let Err(e) = workspace.close() {
+            tracing::warn!(error = %e.to_string(), tmpdir = %tmpdir.display(), "Failed to clean up temporary workspace; continuing");
+        }
 
         tracing::debug!("Creating version symlinks");
         crate::fs::create_version_symlinks(&target_dir, &version.to_string()).await?;
