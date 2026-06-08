@@ -1,6 +1,6 @@
 [package]
 name = "wasmedgeup"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.85"
 authors = ["hydai <hydai@secondstate.io>"]
@@ -13,11 +13,11 @@ license = "Apache-2.0"
 cfg-if = "1.0.4"
 clap = { version = "4.6.1", features = ["derive"] }
 dirs = "6.0.0"
-gix = { version = "0.83.0", default-features = false, features = ["blocking-http-transport-reqwest-rust-tls", "max-performance-safe", "sha1"] }
+gix = { version = "0.84.0", default-features = false, features = ["blocking-http-transport-reqwest-rust-tls", "max-performance-safe", "sha1"] }
 indicatif = { version = "0.18.4", features = ["tokio"] }
-reqwest = "0.13.3"
+reqwest = "0.13.4"
 semver = "1.0.28"
-snafu = "0.9.0"
+snafu = "0.9.1"
 tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["fs", "macros", "rt-multi-thread"] }
 tracing = "0.1.44"
@@ -28,7 +28,7 @@ sha2 = "0.11"
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sysinfo = "0.39.2"
+sysinfo = "0.39.3"
 which = "8"
 raw-cpuid = "11"
 
@@ -51,7 +51,7 @@ default = []
 opencl = ["dep:opencl3"]
 
 [dev-dependencies]
-serial_test = "3.4.0"
+serial_test = "3.5.0"
 
 [profile.dev.package."*"]
 debug = false

@@ -1,3 +1,9 @@
+## 0.2.1 (2026-06-08)
+
+### Fixes
+
+- stage runtime and plugin installs in secure temp workspaces (#286)
+
 ## 0.2.0 (2026-05-08)
 
 ### Breaking Changes
