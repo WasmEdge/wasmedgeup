@@ -1,3 +1,9 @@
+## 0.2.2 (2026-06-09)
+
+### Fixes
+
+- refuse to delete pre-existing real dirs in symlink migration (#285)
+
 ## 0.2.1 (2026-06-08)
 
 ### Fixes
