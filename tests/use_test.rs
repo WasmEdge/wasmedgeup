@@ -174,6 +174,45 @@ async fn test_use_latest_picks_highest_local_version_not_remote() {
     verify_symlinks(&test_home, "0.14.1").await;
 }
 
+#[tokio::test]
+#[serial]
+async fn test_use_refuses_to_replace_existing_real_directory() {
+    // Security regression: `use --path <dir>` must not recursively delete a
+    // pre-existing real directory (e.g. a populated `/usr/local/bin`). It must
+    // refuse with `InvalidPath` and leave the directory and its contents intact.
+    let (_tempdir, test_home) = test_utils::setup_test_environment();
+    let version = "0.15.0";
+
+    let version_dir = test_home.join("versions").join(version);
+    for dir in ["bin", "include", "lib", "plugin"] {
+        tokio::fs::create_dir_all(version_dir.join(dir))
+            .await
+            .unwrap();
+    }
+
+    // A real, non-WasmEdge directory already living at `<test_home>/bin`.
+    let preexisting_bin = test_home.join("bin");
+    tokio::fs::create_dir_all(&preexisting_bin).await.unwrap();
+    tokio::fs::write(preexisting_bin.join("do-not-delete"), "marker")
+        .await
+        .unwrap();
+
+    let args = UseArgs {
+        version: version.to_string(),
+        path: Some(test_home.clone()),
+    };
+    let result = args.execute(CommandContext::default()).await;
+
+    assert!(
+        matches!(result, Err(wasmedgeup::error::Error::InvalidPath { .. })),
+        "use should refuse to replace an existing real directory, got {result:?}"
+    );
+    assert!(
+        preexisting_bin.join("do-not-delete").exists(),
+        "existing directory contents must be preserved (not deleted)"
+    );
+}
+
 async fn verify_symlinks(base_dir: &Path, expected_version: &str) {
     for dir in ["bin", "lib", "include"] {
         let symlink = base_dir.join(dir);
