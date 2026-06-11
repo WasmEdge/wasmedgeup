@@ -30,14 +30,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Work around super-linter
-        shell: bash
-        run: |
-          # Work-around for SHA detection
-          # https://github.com/super-linter/super-linter/issues/6316#issuecomment-2510205626
-          if [[ '${{ github.event_name }}' == 'pull_request' ]]; then
-            echo 'GITHUB_BEFORE_SHA=${{ github.event.pull_request.base.sha }}' >> "${GITHUB_ENV}"
-          fi
       - name: Run Super Linter
         uses: super-linter/super-linter@9e863354e3ff62e0727d37183162c4a88873df41 # v8.6.0
         env:
