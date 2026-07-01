@@ -58,11 +58,135 @@ impl WasmEdgeApiClient {
         Ok(releases.into_iter().take(num_releases).collect())
     }
 
-    /// Fetch the newest stable WasmEdge release via a `spawn_blocking` wrapper
-    /// around the blocking git2 remote call.
+    /// Returns the newest stable version whose **install assets are
+    /// actually available** on the release CDN.
+    ///
+    /// `releases::get_all` enumerates every git tag matching the stable
+    /// semver shape, but a tag can exist before its install artefacts
+    /// are uploaded:
+    ///
+    /// 1. Maintainers push a tag to mark a revision and trigger CI.
+    /// 2. CI builds Linux/macOS/Windows archives plus the SHA256SUM
+    ///    digest file, then a GitHub Release is published with those
+    ///    assets attached. The Release may be created as a *draft*
+    ///    while assets are uploading.
+    ///
+    /// During phase 1 (and during the draft window of phase 2) the tag
+    /// is "latest stable" by name only — `wasmedgeup install latest`
+    /// would 404 on the SHA256SUM download. To pick the version users
+    /// can actually install, we walk candidates newest-first and accept
+    /// the first one whose SHA256SUM file is reachable on the release
+    /// CDN.
+    ///
+    /// Why HEAD the CDN file instead of querying
+    /// `/repos/.../releases/tags/<tag>`: the REST endpoint is gated by
+    /// GitHub's 60-req/hour unauthenticated rate limit, which CI
+    /// runners on shared IPs hit easily — manifesting as 403 spuriously
+    /// reported as "release missing." The release-download URL is
+    /// served by GitHub's CDN with no API rate limit, so the check is
+    /// both cheaper and more reliable. It also incidentally handles the
+    /// draft case: a draft Release exposes no asset URLs to the public
+    /// CDN, so the HEAD naturally 404s.
     pub async fn latest_release(&self) -> Result<Version> {
-        let releases = fetch_releases_blocking(ReleasesFilter::Stable).await?;
-        releases.into_iter().next().ok_or(Error::NoReleasesFound)
+        let candidates = fetch_releases_blocking(ReleasesFilter::Stable).await?;
+        if candidates.is_empty() {
+            return Err(Error::NoReleasesFound);
+        }
+        // Build the HTTP client once and reuse it across every candidate
+        // check so connection pooling and TLS sessions amortise across
+        // the walk during release-prep windows. Each candidate makes
+        // either one HEAD or a HEAD+GET pair; without reuse, every
+        // candidate would pay full TCP+TLS handshake cost.
+        let client = self.http_client()?;
+        for candidate in candidates {
+            if Self::is_release_published(&client, &candidate.to_string()).await? {
+                return Ok(candidate);
+            }
+            tracing::debug!(
+                version = %candidate,
+                "stable tag has no published assets yet — skipping"
+            );
+        }
+        Err(Error::NoPublishedReleasesFound)
+    }
+
+    /// Returns `true` if `tag`'s release SHA256SUM file is downloadable.
+    ///
+    /// The check follows redirects (the github.com release URL 302s to
+    /// the actual CDN object). 404 means the tag has no published
+    /// assets yet — either no Release at all, or a draft Release whose
+    /// assets have not been uploaded.
+    ///
+    /// We try `HEAD` first because it skips the body, but fall back to
+    /// `GET` whenever the `HEAD` doesn't yield a definitive answer.
+    /// Two failure modes both trigger the fallback:
+    ///
+    /// 1. HEAD returns a response with a non-404 non-2xx status — some
+    ///    proxies and CDN edges reject HEAD specifically (commonly 403
+    ///    or 405) while serving the same GET cleanly.
+    /// 2. HEAD's transport itself fails — WAFs configured for a
+    ///    method allow-list will drop HEAD at the network layer, which
+    ///    surfaces as a reqwest `Err` (TCP reset, timeout, etc.)
+    ///    rather than a status code.
+    ///
+    /// Treating both as "HEAD inconclusive, retry GET" matches the
+    /// resilience of `head_ok` and keeps `wasmedgeup install latest`
+    /// and `wasmedgeup list --remote` working behind such
+    /// intermediaries. Truly fatal outcomes on the `GET` arm (5xx,
+    /// transport errors, real auth failures) propagate so transient
+    /// outages surface honestly rather than as misleading
+    /// `NoReleasesFound`.
+    async fn is_release_published(client: &Client, tag: &str) -> Result<bool> {
+        let url = Self::checksum_url(tag);
+
+        match client.head(url.clone()).send().await {
+            Ok(head) if is_missing_status(head.status()) => return Ok(false),
+            Ok(head) if head.status().is_success() => return Ok(true),
+            Ok(head) => tracing::debug!(
+                status = %head.status(),
+                tag,
+                "HEAD on SHA256SUM was rejected; retrying as GET",
+            ),
+            Err(e) => tracing::debug!(
+                error = %e,
+                tag,
+                "HEAD on SHA256SUM failed at transport; retrying as GET",
+            ),
+        }
+
+        let get = client.get(url).send().await.context(RequestSnafu {
+            resource: "release publication check",
+        })?;
+        let status = get.status();
+        if is_missing_status(status) {
+            // Drain the body so hyper can return the underlying connection
+            // to the pool. Dropping the response without reading the body
+            // taints the socket as non-reusable, which would silently
+            // negate the `Client` reuse in `latest_release()` whenever the
+            // GET fallback fires (i.e. exactly the case where pool reuse
+            // matters).
+            let _ = get.bytes().await;
+            return Ok(false);
+        }
+        let resp = get.error_for_status().context(RequestSnafu {
+            resource: "release publication check",
+        })?;
+        // Same body-draining contract on the success path.
+        let _ = resp.bytes().await;
+        Ok(true)
+    }
+
+    /// Build the URL for `tag`'s release SHA256SUM file. Shared between
+    /// `is_release_published` (HEAD/GET reachability check) and
+    /// `get_archive_checksum` (real download), so any future change to
+    /// the release URL scheme touches one place.
+    fn checksum_url(tag: &str) -> Url {
+        let mut url = Url::parse(WASMEDGE_RELEASE_BASE_URL)
+            .expect("WASMEDGE_RELEASE_BASE_URL must be a valid URL");
+        url.path_segments_mut()
+            .expect("base is valid URL")
+            .extend(&[tag, CHECKSUM_FILE_NAME]);
+        url
     }
 
     /// Parse `version` as semver, or resolve `"latest"` via `latest_release`.
@@ -104,12 +228,7 @@ impl WasmEdgeApiClient {
     /// release tag that lists hashes for both runtime archives and plugin
     /// archives, so the same lookup serves both installer paths.
     pub async fn get_archive_checksum(&self, tag: &str, archive_name: &str) -> Result<String> {
-        let mut url = Url::parse(WASMEDGE_RELEASE_BASE_URL)
-            .expect("WASMEDGE_RELEASE_BASE_URL must be a valid URL");
-
-        url.path_segments_mut()
-            .expect("base is valid URL")
-            .extend(&[tag, CHECKSUM_FILE_NAME]);
+        let url = Self::checksum_url(tag);
 
         tracing::debug!(%url, CHECKSUM_FILE_NAME, "Trying checksum file");
 
@@ -123,10 +242,7 @@ impl WasmEdgeApiClient {
         // statuses (403 rate-limit, 5xx outage) are operational errors and
         // propagate via Error::Request so the user sees the actual status
         // instead of a misleading "checksum not found".
-        if matches!(
-            response.status(),
-            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
-        ) {
+        if is_missing_status(response.status()) {
             tracing::debug!(
                 status = %response.status(),
                 file = CHECKSUM_FILE_NAME,
@@ -498,6 +614,21 @@ pub fn runtime_ge_015(runtime: &str) -> bool {
     semver::Version::parse(runtime)
         .map(|v| v >= semver::Version::new(0, 15, 0))
         .unwrap_or(true)
+}
+
+/// Returns `true` for HTTP statuses that signal "this asset is not (or no
+/// longer) available." Currently `404 Not Found` (never published) and
+/// `410 Gone` (explicitly removed). Shared between the publication probe
+/// in `is_release_published` and the real download in
+/// `get_archive_checksum` so both functions agree on what "missing"
+/// means — that way deleting an old release doesn't make the publication
+/// probe abort `latest_release` while the equivalent download path
+/// still treats it as "missing checksum, fall through".
+fn is_missing_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+    )
 }
 
 /// Run the synchronous git2-based release enumeration on a blocking worker.
