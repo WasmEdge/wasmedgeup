@@ -1,9 +1,0 @@
-# cargo-audit configuration — https://github.com/rustsec/rustsec/tree/main/cargo-audit
-[advisories]
-# RUSTSEC-2026-0173: proc-macro-error2 unmaintained (informational, not a vulnerability).
-# Phantom transitive dep behind jiff's optional, disabled `defmt` feature:
-#   gix -> gix-date -> jiff -> defmt (optional, off) -> defmt-macros -> proc-macro-error2
-# Never compiled into the binary (`cargo tree -e normal -i proc-macro-error2` prints nothing),
-# and latest jiff/defmt-macros still pull it in, so it cannot be removed by upgrading.
-# Drop this entry once upstream defmt-macros migrates off proc-macro-error2.
-ignore = ["RUSTSEC-2026-0173"]
