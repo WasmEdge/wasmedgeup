@@ -1,7 +1,12 @@
 name: Security audit
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
+    branches: [master]
     paths:
       - ".github/workflows/audit_check.yml"
       - "**/Cargo.toml"
