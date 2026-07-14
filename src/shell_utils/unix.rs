@@ -38,7 +38,7 @@ pub fn setup_path(install_dir: &Path) -> Result<()> {
             written.push(env_script);
         }
         let source_line = shell.source_line(install_dir);
-        let source_line_with_newline = format!("\n{}", &source_line);
+        let source_line_with_newline = format!("\n{}", source_line);
 
         for rc in shell.effective_rc_files() {
             let line_to_write: &str = match read_to_string(&rc) {
