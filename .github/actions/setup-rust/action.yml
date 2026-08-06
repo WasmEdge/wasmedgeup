@@ -28,7 +28,7 @@ runs:
       shell: bash
       run: rustup target add ${{ inputs.target }}
 
-    - uses: mozilla-actions/sccache-action@v0.0.10
+    - uses: mozilla-actions/sccache-action@v0.0.11
       if: "${{ inputs.cache == 'true' }}"
 
     - name: Setup rust cache variables
