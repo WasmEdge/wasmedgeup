@@ -81,16 +81,19 @@ async fn test_install_latest_version() {
     let tmpdir = tempdir().unwrap();
     let install_dir = tmpdir.path().join("install_target");
 
-    let all_releases = releases::get_all(WASM_EDGE_GIT_URL, ReleasesFilter::Stable).unwrap();
-    assert!(!all_releases.is_empty());
-
     let (_tempdir, _test_home) = setup_test_environment();
     #[cfg(windows)]
     {
         // Give Windows a moment to release any file handles
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    execute_install_test(all_releases[0].to_string(), install_dir, tmpdir, false).await;
+    // Pass "latest" through the same resolution path users hit so the test
+    // exercises `latest_release()` end-to-end. Picking `releases::get_all`'s
+    // first element directly would re-create the bug where a stable git
+    // tag (e.g. 0.16.3) is reported as latest before its GitHub Release
+    // is published, even though `latest_release()` already filters those
+    // out.
+    execute_install_test("latest".to_string(), install_dir, tmpdir, false).await;
 }
 
 #[tokio::test]
