@@ -6,7 +6,7 @@ use tokio::fs;
 use crate::{
     api::{Asset, WasmEdgeApiClient},
     cli::{CommandContext, CommandExecutor},
-    commands::default_path,
+    commands::resolve_install_path,
     prelude::*,
     shell_utils,
     target::{TargetArch, TargetOS},
@@ -135,10 +135,7 @@ impl CommandExecutor for InstallArgs {
             .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to extract asset"))?;
         tracing::debug!(dest = %tmpdir.display(), "Extraction completed successfully");
 
-        let target_dir = match self.path {
-            Some(p) => p,
-            None => default_path()?,
-        };
+        let target_dir = resolve_install_path(self.path)?;
 
         if target_dir.exists() {
             if crate::fs::can_write_to_directory(&target_dir) {
