@@ -2,7 +2,7 @@ use std::{
     fmt::Write,
     io::{Read, Seek},
     path::Path,
-    sync::OnceLock,
+    sync::{Mutex, OnceLock, PoisonError},
 };
 
 use crate::{
@@ -38,12 +38,43 @@ pub struct WasmEdgeApiClient {
     pub request_timeout: u64,
 }
 
+/// The most recently built HTTP client together with the timeouts it was
+/// built from. A wasmedgeup process uses one timeout configuration, so a
+/// single slot lets every request share one connection pool instead of paying
+/// a new TCP + TLS handshake each time, while keeping the cache bounded; a
+/// different configuration simply replaces it.
+static HTTP_CLIENT: Mutex<Option<((u64, u64), Client)>> = Mutex::new(None);
+
+/// Return the client in `slot` if it was built with `timeouts`; otherwise
+/// `build` one, store it in `slot` and return it.
+fn cached_http_client(
+    slot: &mut Option<((u64, u64), Client)>,
+    timeouts: (u64, u64),
+    build: impl FnOnce() -> Result<Client>,
+) -> Result<Client> {
+    if let Some((_, client)) = slot.as_ref().filter(|(cached, _)| *cached == timeouts) {
+        return Ok(client.clone());
+    }
+
+    let client = build()?;
+    *slot = Some((timeouts, client.clone()));
+    Ok(client)
+}
+
 impl WasmEdgeApiClient {
     fn http_client(&self) -> Result<Client> {
-        HttpClientConfig::new()
-            .with_connect_timeout(self.connect_timeout)
-            .with_request_timeout(self.request_timeout)
-            .build()
+        // The slot only ever holds a finished client, so a poisoned lock is still safe to reuse.
+        let mut slot = HTTP_CLIENT.lock().unwrap_or_else(PoisonError::into_inner);
+        cached_http_client(
+            &mut slot,
+            (self.connect_timeout, self.request_timeout),
+            || {
+                HttpClientConfig::new()
+                    .with_connect_timeout(self.connect_timeout)
+                    .with_request_timeout(self.request_timeout)
+                    .build()
+            },
+        )
     }
 
     /// Fetch the first `num_releases` WasmEdge versions from the upstream git
@@ -581,9 +612,88 @@ pub fn plugin_asset_url(plugin: &str, runtime: &str, platform: &str, is_zip: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     fn v(s: &str) -> Version {
         Version::parse(s).expect("valid semver")
+    }
+
+    fn cached_http_client_timeouts() -> Option<(u64, u64)> {
+        HTTP_CLIENT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(timeouts, _)| *timeouts)
+    }
+
+    fn counting_build(builds: &Cell<usize>) -> impl FnOnce() -> Result<Client> + '_ {
+        move || {
+            builds.set(builds.get() + 1);
+            Ok(Client::new())
+        }
+    }
+
+    #[test]
+    fn cached_http_client_builds_once_for_same_timeouts() {
+        let mut slot = None;
+        let builds = Cell::new(0);
+
+        cached_http_client(&mut slot, (1, 2), counting_build(&builds)).expect("first build");
+        cached_http_client(&mut slot, (1, 2), counting_build(&builds)).expect("reuse");
+
+        assert_eq!(
+            builds.get(),
+            1,
+            "a second call with the same timeouts must reuse the cached client"
+        );
+        assert_eq!(slot.as_ref().map(|(timeouts, _)| *timeouts), Some((1, 2)));
+    }
+
+    #[test]
+    fn cached_http_client_rebuilds_when_timeouts_change() {
+        let mut slot = None;
+        let builds = Cell::new(0);
+
+        cached_http_client(&mut slot, (1, 2), counting_build(&builds)).expect("build");
+        cached_http_client(&mut slot, (1, 3), counting_build(&builds)).expect("rebuild");
+
+        assert_eq!(
+            builds.get(),
+            2,
+            "different timeouts must build a new client"
+        );
+        assert_eq!(
+            slot.as_ref().map(|(timeouts, _)| *timeouts),
+            Some((1, 3)),
+            "the new client replaces the old one"
+        );
+    }
+
+    #[test]
+    fn cached_http_client_does_not_cache_failed_builds() {
+        let mut slot = None;
+
+        let result = cached_http_client(&mut slot, (1, 2), || {
+            Err(Error::HttpClientBuild {
+                reason: "boom".into(),
+            })
+        });
+
+        assert!(result.is_err());
+        assert!(slot.is_none(), "a failed build must leave the slot empty");
+    }
+
+    // The process-wide slot is shared, so tests observing it must not interleave.
+    #[test]
+    #[serial_test::serial(http_client_cache)]
+    fn http_client_stores_the_instance_timeouts_in_the_shared_slot() {
+        let api = WasmEdgeApiClient::new()
+            .with_connect_timeout(9_001)
+            .with_request_timeout(9_002);
+
+        api.http_client().expect("build");
+
+        assert_eq!(cached_http_client_timeouts(), Some((9_001, 9_002)));
     }
 
     #[test]
