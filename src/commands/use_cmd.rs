@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::{
     api::latest_installed_version,
     cli::{CommandContext, CommandExecutor},
-    commands::default_path,
+    commands::resolve_install_path,
     fs,
     prelude::*,
 };
@@ -25,10 +25,7 @@ pub struct UseArgs {
 impl CommandExecutor for UseArgs {
     #[tracing::instrument(name = "use", skip_all, fields(version = self.version))]
     async fn execute(self, _ctx: CommandContext) -> Result<()> {
-        let target_dir = match self.path {
-            Some(p) => p,
-            None => default_path()?,
-        };
+        let target_dir = resolve_install_path(self.path)?;
         let versions_dir = target_dir.join("versions");
 
         // `use` switches between locally installed versions. Resolving "latest"

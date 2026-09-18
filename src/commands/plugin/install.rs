@@ -8,7 +8,7 @@ use crate::api::{plugin_archive_name, plugin_asset_url, WasmEdgeApiClient};
 use crate::system::plugins::plugin_platform_key;
 use crate::{
     cli::{CommandContext, CommandExecutor},
-    commands::default_path,
+    commands::resolve_install_path,
     error::{Error, Result},
     fs as wfs, system,
 };
@@ -84,11 +84,7 @@ impl CommandExecutor for PluginInstallArgs {
             return Err(Error::NoPluginsSpecified);
         }
 
-        let versions_dir = match self.path.clone() {
-            Some(p) => p,
-            None => default_path()?,
-        }
-        .join("versions");
+        let versions_dir = resolve_install_path(self.path.clone())?.join("versions");
         let runtime_version = select_runtime_version(&versions_dir, self.runtime.as_deref())?;
         let version_dir = versions_dir.join(runtime_version.to_string());
 

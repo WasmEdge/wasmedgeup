@@ -6,7 +6,7 @@ use clap::Args;
 use super::install::select_runtime_version;
 use super::utils::extract_plugin_name;
 use super::version::PluginVersion;
-use crate::commands::default_path;
+use crate::commands::resolve_install_path;
 use crate::{
     cli::{CommandContext, CommandExecutor},
     error::{Error, Result},
@@ -41,11 +41,7 @@ impl CommandExecutor for PluginRemoveArgs {
             return Err(Error::NoPluginsSpecified);
         }
 
-        let versions_dir = match self.path.clone() {
-            Some(p) => p,
-            None => default_path()?,
-        }
-        .join("versions");
+        let versions_dir = resolve_install_path(self.path.clone())?.join("versions");
 
         let runtime_version = select_runtime_version(&versions_dir, self.runtime.as_deref())?;
         let version_dir = versions_dir.join(runtime_version.to_string());

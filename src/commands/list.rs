@@ -3,7 +3,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use tokio::fs;
 
-use crate::{cli::CommandExecutor, commands::default_path};
+use crate::{cli::CommandExecutor, commands::resolve_install_path};
 
 #[derive(Debug, Parser)]
 pub struct ListArgs {
@@ -43,10 +43,7 @@ impl CommandExecutor for ListArgs {
                 }
             }
         } else {
-            let target_dir = match self.path {
-                Some(p) => p,
-                None => default_path()?,
-            };
+            let target_dir = resolve_install_path(self.path)?;
             let versions_dir = target_dir.join("versions");
 
             let current_version =

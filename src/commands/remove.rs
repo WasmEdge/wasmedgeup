@@ -6,7 +6,7 @@ use tokio::fs;
 use crate::{
     api::latest_installed_version,
     cli::{CommandContext, CommandExecutor},
-    commands::{default_path, use_cmd::UseArgs},
+    commands::{resolve_install_path, use_cmd::UseArgs},
     prelude::*,
     shell_utils::uninstall_path,
 };
@@ -30,10 +30,7 @@ pub struct RemoveArgs {
 
 impl CommandExecutor for RemoveArgs {
     async fn execute(self, ctx: CommandContext) -> Result<()> {
-        let target_dir = match self.path {
-            Some(p) => p,
-            None => default_path()?,
-        };
+        let target_dir = resolve_install_path(self.path)?;
         let versions_dir = target_dir.join("versions");
 
         if !versions_dir.exists() {
