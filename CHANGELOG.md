@@ -1,3 +1,9 @@
+## 0.2.3 (2026-09-18)
+
+### Fixes
+
+- skip stable tags whose release assets are not yet uploaded (#277)
+
 ## 0.2.2 (2026-06-09)
 
 ### Fixes
