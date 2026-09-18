@@ -89,11 +89,87 @@ impl WasmEdgeApiClient {
         Ok(releases.into_iter().take(num_releases).collect())
     }
 
-    /// Fetch the newest stable WasmEdge release via a `spawn_blocking` wrapper
-    /// around the blocking git2 remote call.
+    /// Return the newest stable version whose release assets are uploaded.
+    ///
+    /// A tag can exist before its GitHub Release has assets. Walk the stable
+    /// tags newest-first and return the first whose SHA256SUM is reachable on
+    /// the release CDN. The CDN is probed instead of the Releases REST API
+    /// because the API is rate-limited for unauthenticated callers.
     pub async fn latest_release(&self) -> Result<Version> {
-        let releases = fetch_releases_blocking(ReleasesFilter::Stable).await?;
-        releases.into_iter().next().ok_or(Error::NoReleasesFound)
+        let candidates = fetch_releases_blocking(ReleasesFilter::Stable).await?;
+        if candidates.is_empty() {
+            return Err(Error::NoReleasesFound);
+        }
+        let client = self.http_client()?;
+        let candidates = candidates
+            .into_iter()
+            .map(|version| {
+                let url = Self::checksum_url(&version.to_string());
+                (version, url)
+            })
+            .collect();
+        Self::first_published(&client, candidates).await
+    }
+
+    /// Return the first version whose checksum `Url` is downloadable.
+    async fn first_published(client: &Client, candidates: Vec<(Version, Url)>) -> Result<Version> {
+        for (version, url) in candidates {
+            if Self::is_release_published(client, url).await? {
+                return Ok(version);
+            }
+            tracing::debug!(%version, "stable tag has no published assets yet — skipping");
+        }
+        Err(Error::NoPublishedReleasesFound)
+    }
+
+    /// Return `true` if the file at `url` is downloadable.
+    ///
+    /// HEAD first; retry as GET when HEAD is rejected or fails at transport.
+    /// 404/410 means the file is not published. Other GET errors propagate.
+    async fn is_release_published(client: &Client, url: Url) -> Result<bool> {
+        match client.head(url.clone()).send().await {
+            Ok(head) if is_missing_status(head.status()) => return Ok(false),
+            Ok(head) if head.status().is_success() => return Ok(true),
+            Ok(head) => tracing::debug!(
+                status = %head.status(),
+                %url,
+                "HEAD was rejected; retrying as GET",
+            ),
+            Err(e) => tracing::debug!(
+                error = %e,
+                %url,
+                "HEAD failed at transport; retrying as GET",
+            ),
+        }
+
+        let get = client.get(url).send().await.context(RequestSnafu {
+            resource: "release publication check",
+        })?;
+        if is_missing_status(get.status()) {
+            // Drain the body so the connection returns to the pool.
+            let _ = get.bytes().await;
+            return Ok(false);
+        }
+        get.error_for_status()
+            .context(RequestSnafu {
+                resource: "release publication check",
+            })?
+            .bytes()
+            .await
+            .context(RequestSnafu {
+                resource: "release publication check",
+            })?;
+        Ok(true)
+    }
+
+    /// Build the URL of the SHA256SUM file for release `tag`.
+    fn checksum_url(tag: &str) -> Url {
+        let mut url = Url::parse(WASMEDGE_RELEASE_BASE_URL)
+            .expect("WASMEDGE_RELEASE_BASE_URL must be a valid URL");
+        url.path_segments_mut()
+            .expect("base is valid URL")
+            .extend(&[tag, CHECKSUM_FILE_NAME]);
+        url
     }
 
     /// Parse `version` as semver, or resolve `"latest"` via `latest_release`.
@@ -135,12 +211,7 @@ impl WasmEdgeApiClient {
     /// release tag that lists hashes for both runtime archives and plugin
     /// archives, so the same lookup serves both installer paths.
     pub async fn get_archive_checksum(&self, tag: &str, archive_name: &str) -> Result<String> {
-        let mut url = Url::parse(WASMEDGE_RELEASE_BASE_URL)
-            .expect("WASMEDGE_RELEASE_BASE_URL must be a valid URL");
-
-        url.path_segments_mut()
-            .expect("base is valid URL")
-            .extend(&[tag, CHECKSUM_FILE_NAME]);
+        let url = Self::checksum_url(tag);
 
         tracing::debug!(%url, CHECKSUM_FILE_NAME, "Trying checksum file");
 
@@ -154,10 +225,7 @@ impl WasmEdgeApiClient {
         // statuses (403 rate-limit, 5xx outage) are operational errors and
         // propagate via Error::Request so the user sees the actual status
         // instead of a misleading "checksum not found".
-        if matches!(
-            response.status(),
-            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
-        ) {
+        if is_missing_status(response.status()) {
             tracing::debug!(
                 status = %response.status(),
                 file = CHECKSUM_FILE_NAME,
@@ -531,6 +599,14 @@ pub fn runtime_ge_015(runtime: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// Return `true` for 404 and 410: the asset is not, or no longer, published.
+fn is_missing_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+    )
+}
+
 /// Run the synchronous git2-based release enumeration on a blocking worker.
 ///
 /// `releases::get_all` internally calls `git2::Remote::connect` and
@@ -612,7 +688,12 @@ pub fn plugin_asset_url(plugin: &str, runtime: &str, platform: &str, is_zip: boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::{
+        cell::Cell,
+        io::Write as _,
+        net::{TcpListener, TcpStream},
+        sync::Arc,
+    };
 
     fn v(s: &str) -> Version {
         Version::parse(s).expect("valid semver")
@@ -910,5 +991,235 @@ mod tests {
             url.as_str(),
             "https://github.com/WasmEdge/WasmEdge/releases/download/0.14.1/WasmEdge-plugin-wasi_crypto-0.14.1-windows_x86_64.zip"
         );
+    }
+
+    /// Local HTTP server. Path scheme: `/<head>/<get>/SHA256SUM`, where each
+    /// segment is a status code, `drop` (close without a response) or
+    /// `truncate` (200 with a short body).
+    struct StubServer {
+        base: String,
+        requests: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl StubServer {
+        fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let base = format!("http://{}", listener.local_addr().expect("addr"));
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let log = Arc::clone(&requests);
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let log = Arc::clone(&log);
+                    std::thread::spawn(move || Self::serve(stream, &log));
+                }
+            });
+            Self { base, requests }
+        }
+
+        fn serve(mut stream: TcpStream, log: &Mutex<Vec<(String, String)>>) {
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.ends_with(b"\r\n\r\n") {
+                let n = stream.read(&mut buf).expect("read");
+                if n == 0 {
+                    return;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
+            let request_line = std::str::from_utf8(&head)
+                .expect("utf8")
+                .lines()
+                .next()
+                .unwrap();
+            let mut parts = request_line.split(' ');
+            let method = parts.next().unwrap().to_string();
+            let path = parts.next().unwrap().to_string();
+            log.lock().unwrap().push((method.clone(), path.clone()));
+
+            let mut segments = path.trim_start_matches('/').split('/');
+            let head_action = segments.next().unwrap();
+            let get_action = segments.next().unwrap();
+            let action = if method == "HEAD" {
+                head_action
+            } else {
+                get_action
+            };
+            let body = if method == "HEAD" {
+                ""
+            } else {
+                "checksum body"
+            };
+            let response = match action {
+                "drop" => return,
+                "truncate" => {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\nabc"
+                        .to_string()
+                }
+                code => format!(
+                    "HTTP/1.1 {code} Stub\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ),
+            };
+            let _ = stream.write_all(response.as_bytes());
+        }
+
+        fn url(&self, path: &str) -> Url {
+            Url::parse(&format!("{}{path}", self.base)).expect("valid url")
+        }
+
+        fn methods(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(method, _)| method.clone())
+                .collect()
+        }
+
+        fn paths(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, path)| path.clone())
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn is_release_published_head_success_is_published() {
+        let server = StubServer::start();
+        let published = WasmEdgeApiClient::is_release_published(
+            &Client::new(),
+            server.url("/200/500/SHA256SUM"),
+        )
+        .await
+        .expect("probe succeeds");
+        assert!(published);
+        assert_eq!(server.methods(), ["HEAD"]);
+    }
+
+    #[tokio::test]
+    async fn is_release_published_head_404_and_410_are_unpublished() {
+        for code in ["404", "410"] {
+            let server = StubServer::start();
+            let published = WasmEdgeApiClient::is_release_published(
+                &Client::new(),
+                server.url(&format!("/{code}/200/SHA256SUM")),
+            )
+            .await
+            .expect("probe succeeds");
+            assert!(!published, "HEAD {code} must mean unpublished");
+            assert_eq!(
+                server.methods(),
+                ["HEAD"],
+                "HEAD {code} must not fall back to GET"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn is_release_published_falls_back_to_get_when_head_is_rejected() {
+        let server = StubServer::start();
+        let published = WasmEdgeApiClient::is_release_published(
+            &Client::new(),
+            server.url("/405/200/SHA256SUM"),
+        )
+        .await
+        .expect("probe succeeds");
+        assert!(published);
+        assert_eq!(server.methods(), ["HEAD", "GET"]);
+    }
+
+    #[tokio::test]
+    async fn is_release_published_falls_back_to_get_when_head_transport_fails() {
+        let server = StubServer::start();
+        let published = WasmEdgeApiClient::is_release_published(
+            &Client::new(),
+            server.url("/drop/200/SHA256SUM"),
+        )
+        .await
+        .expect("probe succeeds");
+        assert!(published);
+        assert_eq!(server.methods(), ["HEAD", "GET"]);
+    }
+
+    #[tokio::test]
+    async fn is_release_published_get_404_is_unpublished() {
+        let server = StubServer::start();
+        let published = WasmEdgeApiClient::is_release_published(
+            &Client::new(),
+            server.url("/405/404/SHA256SUM"),
+        )
+        .await
+        .expect("probe succeeds");
+        assert!(!published);
+        assert_eq!(server.methods(), ["HEAD", "GET"]);
+    }
+
+    #[tokio::test]
+    async fn is_release_published_get_error_propagates() {
+        let server = StubServer::start();
+        let err = WasmEdgeApiClient::is_release_published(
+            &Client::new(),
+            server.url("/405/500/SHA256SUM"),
+        )
+        .await
+        .expect_err("GET 500 must be an error");
+        assert!(matches!(err, Error::Request { .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn is_release_published_truncated_get_body_is_an_error() {
+        let server = StubServer::start();
+        let err = WasmEdgeApiClient::is_release_published(
+            &Client::new(),
+            server.url("/405/truncate/SHA256SUM"),
+        )
+        .await
+        .expect_err("a body that cannot be read is not downloadable");
+        assert!(matches!(err, Error::Request { .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn first_published_skips_unpublished_newer_tags() {
+        let server = StubServer::start();
+        let candidates = vec![
+            (v("0.17.1"), server.url("/404/200/SHA256SUM")),
+            (v("0.17.0"), server.url("/200/200/SHA256SUM")),
+            (v("0.16.4"), server.url("/200/200/SHA256SUM")),
+        ];
+        let latest = WasmEdgeApiClient::first_published(&Client::new(), candidates)
+            .await
+            .expect("an older tag is published");
+        assert_eq!(latest, v("0.17.0"));
+        assert_eq!(server.paths(), ["/404/200/SHA256SUM", "/200/200/SHA256SUM"]);
+    }
+
+    #[tokio::test]
+    async fn first_published_errors_when_no_tag_is_published() {
+        let server = StubServer::start();
+        let candidates = vec![
+            (v("0.17.1"), server.url("/404/200/SHA256SUM")),
+            (v("0.17.0"), server.url("/410/200/SHA256SUM")),
+        ];
+        let err = WasmEdgeApiClient::first_published(&Client::new(), candidates)
+            .await
+            .expect_err("no candidate is published");
+        assert!(matches!(err, Error::NoPublishedReleasesFound), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn first_published_stops_at_probe_errors() {
+        let server = StubServer::start();
+        let candidates = vec![
+            (v("0.17.1"), server.url("/405/500/SHA256SUM")),
+            (v("0.17.0"), server.url("/200/200/SHA256SUM")),
+        ];
+        let err = WasmEdgeApiClient::first_published(&Client::new(), candidates)
+            .await
+            .expect_err("a probe error must not select an older tag");
+        assert!(matches!(err, Error::Request { .. }), "{err:?}");
+        assert_eq!(server.paths(), ["/405/500/SHA256SUM", "/405/500/SHA256SUM"]);
     }
 }
