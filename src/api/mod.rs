@@ -45,6 +45,9 @@ pub struct WasmEdgeApiClient {
 /// different configuration simply replaces it.
 static HTTP_CLIENT: Mutex<Option<((u64, u64), Client)>> = Mutex::new(None);
 
+/// Maximum response body accepted by the release publication GET fallback.
+const MAX_PUBLICATION_PROBE_BODY_BYTES: u64 = 1024 * 1024;
+
 /// Return the client in `slot` if it was built with `timeouts`; otherwise
 /// `build` one, store it in `slot` and return it.
 fn cached_http_client(
@@ -146,20 +149,51 @@ impl WasmEdgeApiClient {
             resource: "release publication check",
         })?;
         if is_missing_status(get.status()) {
-            // Drain the body so the connection returns to the pool.
-            let _ = get.bytes().await;
             return Ok(false);
         }
-        get.error_for_status()
-            .context(RequestSnafu {
-                resource: "release publication check",
-            })?
-            .bytes()
-            .await
-            .context(RequestSnafu {
-                resource: "release publication check",
-            })?;
+        let get = get.error_for_status().context(RequestSnafu {
+            resource: "release publication check",
+        })?;
+        Self::consume_publication_probe_body(get).await?;
         Ok(true)
+    }
+
+    /// Consume a successful GET probe without buffering its full body.
+    ///
+    /// Checking `Content-Length` rejects known oversized responses before any
+    /// body read. The byte counter also enforces the limit for chunked or
+    /// otherwise lengthless responses while retaining the existing guarantee
+    /// that truncated response bodies are reported as request errors.
+    async fn consume_publication_probe_body(mut response: Response) -> Result<()> {
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_PUBLICATION_PROBE_BODY_BYTES)
+        {
+            return Err(Self::publication_probe_body_too_large());
+        }
+
+        let mut bytes_read = 0_u64;
+        while let Some(chunk) = response.chunk().await.context(RequestSnafu {
+            resource: "release publication check",
+        })? {
+            bytes_read = bytes_read.saturating_add(chunk.len() as u64);
+            if bytes_read > MAX_PUBLICATION_PROBE_BODY_BYTES {
+                return Err(Self::publication_probe_body_too_large());
+            }
+        }
+        Ok(())
+    }
+
+    fn publication_probe_body_too_large() -> Error {
+        Error::IO {
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "release publication check response exceeds the {}-byte limit",
+                    MAX_PUBLICATION_PROBE_BODY_BYTES
+                ),
+            ),
+        }
     }
 
     /// Build the URL of the SHA256SUM file for release `tag`.
@@ -994,8 +1028,8 @@ mod tests {
     }
 
     /// Local HTTP server. Path scheme: `/<head>/<get>/SHA256SUM`, where each
-    /// segment is a status code, `drop` (close without a response) or
-    /// `truncate` (200 with a short body).
+    /// segment is a status code or a named response scenario such as `drop`,
+    /// `truncate`, `oversize`, or `chunked-oversize`.
     struct StubServer {
         base: String,
         requests: Arc<Mutex<Vec<(String, String)>>>,
@@ -1049,6 +1083,41 @@ mod tests {
             } else {
                 "checksum body"
             };
+            if matches!(action, "oversize" | "chunked-oversize") {
+                let body_len = MAX_PUBLICATION_PROBE_BODY_BYTES + 1;
+                let header = if action == "oversize" {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+                    )
+                } else {
+                    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                };
+                if stream.write_all(header.as_bytes()).is_err() {
+                    return;
+                }
+
+                let chunk = [b'x'; DOWNLOAD_BUFFER_SIZE];
+                let mut remaining = body_len;
+                while remaining > 0 {
+                    let len = remaining.min(chunk.len() as u64) as usize;
+                    let result = if action == "oversize" {
+                        stream.write_all(&chunk[..len])
+                    } else {
+                        write!(stream, "{len:x}\r\n")
+                            .and_then(|()| stream.write_all(&chunk[..len]))
+                            .and_then(|()| stream.write_all(b"\r\n"))
+                    };
+                    if result.is_err() {
+                        return;
+                    }
+                    remaining -= len as u64;
+                }
+                if action == "chunked-oversize" {
+                    let _ = stream.write_all(b"0\r\n\r\n");
+                }
+                return;
+            }
             let response = match action {
                 "drop" => return,
                 "truncate" => {
@@ -1179,6 +1248,46 @@ mod tests {
         .await
         .expect_err("a body that cannot be read is not downloadable");
         assert!(matches!(err, Error::Request { .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn is_release_published_rejects_oversized_get_body() {
+        let server = StubServer::start();
+        let err = WasmEdgeApiClient::is_release_published(
+            &Client::new(),
+            server.url("/405/oversize/SHA256SUM"),
+        )
+        .await
+        .expect_err("a response larger than the publication probe limit must be rejected");
+        assert!(
+            matches!(
+                err,
+                Error::IO { ref source }
+                    if source.kind() == std::io::ErrorKind::InvalidData
+                        && source.to_string().contains("1048576-byte limit")
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_release_published_rejects_oversized_chunked_get_body() {
+        let server = StubServer::start();
+        let err = WasmEdgeApiClient::is_release_published(
+            &Client::new(),
+            server.url("/405/chunked-oversize/SHA256SUM"),
+        )
+        .await
+        .expect_err("a chunked response larger than the publication probe limit must be rejected");
+        assert!(
+            matches!(
+                err,
+                Error::IO { ref source }
+                    if source.kind() == std::io::ErrorKind::InvalidData
+                        && source.to_string().contains("1048576-byte limit")
+            ),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
