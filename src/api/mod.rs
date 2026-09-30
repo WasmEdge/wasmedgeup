@@ -48,6 +48,9 @@ static HTTP_CLIENT: Mutex<Option<((u64, u64), Client)>> = Mutex::new(None);
 /// Maximum response body accepted by the release publication GET fallback.
 const MAX_PUBLICATION_PROBE_BODY_BYTES: u64 = 1024 * 1024;
 
+/// Maximum number of release tags checked for published assets per operation.
+const MAX_RELEASE_PUBLICATION_PROBES: usize = 10;
+
 /// Return the client in `slot` if it was built with `timeouts`; otherwise
 /// `build` one, store it in `slot` and return it.
 fn cached_http_client(
@@ -81,8 +84,8 @@ impl WasmEdgeApiClient {
     }
 
     /// Fetch the first `num_releases` WasmEdge versions from the upstream git
-    /// remote. The underlying `git2::Remote::connect` call is blocking; we run
-    /// it on `spawn_blocking` so the tokio worker stays free.
+    /// remote. The underlying gix transport is blocking, so we run it on
+    /// `spawn_blocking` to keep the tokio worker free.
     pub async fn releases(
         &self,
         filter: ReleasesFilter,
@@ -90,6 +93,20 @@ impl WasmEdgeApiClient {
     ) -> Result<Vec<Version>> {
         let releases = fetch_releases_blocking(filter).await?;
         Ok(releases.into_iter().take(num_releases).collect())
+    }
+
+    pub(crate) async fn releases_with_latest(
+        &self,
+        filter: ReleasesFilter,
+        num_releases: usize,
+    ) -> Result<(Vec<Version>, Version)> {
+        let candidates = fetch_releases_blocking(ReleasesFilter::All).await?;
+        let (releases, stable_candidates) =
+            select_release_listing(candidates, filter, num_releases);
+        let latest = self
+            .latest_release_from_candidates(stable_candidates)
+            .await?;
+        Ok((releases, latest))
     }
 
     /// Return the newest stable version whose release assets are uploaded.
@@ -100,6 +117,10 @@ impl WasmEdgeApiClient {
     /// because the API is rate-limited for unauthenticated callers.
     pub async fn latest_release(&self) -> Result<Version> {
         let candidates = fetch_releases_blocking(ReleasesFilter::Stable).await?;
+        self.latest_release_from_candidates(candidates).await
+    }
+
+    async fn latest_release_from_candidates(&self, candidates: Vec<Version>) -> Result<Version> {
         if candidates.is_empty() {
             return Err(Error::NoReleasesFound);
         }
@@ -116,7 +137,7 @@ impl WasmEdgeApiClient {
 
     /// Return the first version whose checksum `Url` is downloadable.
     async fn first_published(client: &Client, candidates: Vec<(Version, Url)>) -> Result<Version> {
-        for (version, url) in candidates {
+        for (version, url) in candidates.into_iter().take(MAX_RELEASE_PUBLICATION_PROBES) {
             if Self::is_release_published(client, url).await? {
                 return Ok(version);
             }
@@ -641,12 +662,29 @@ fn is_missing_status(status: reqwest::StatusCode) -> bool {
     )
 }
 
-/// Run the synchronous git2-based release enumeration on a blocking worker.
+fn select_release_listing(
+    candidates: Vec<Version>,
+    filter: ReleasesFilter,
+    num_releases: usize,
+) -> (Vec<Version>, Vec<Version>) {
+    let releases = candidates
+        .iter()
+        .filter(|version| filter.matches(version))
+        .take(num_releases)
+        .cloned()
+        .collect();
+    let stable_candidates = candidates
+        .into_iter()
+        .filter(|version| ReleasesFilter::Stable.matches(version))
+        .collect();
+    (releases, stable_candidates)
+}
+
+/// Run the synchronous gix-based release enumeration on a blocking worker.
 ///
-/// `releases::get_all` internally calls `git2::Remote::connect` and
-/// `Remote::list`, both of which perform blocking network I/O. Running them
-/// on the tokio runtime directly would stall other async tasks for the
-/// duration of the git protocol handshake, so we hop to a blocking thread.
+/// `releases::get_all` performs blocking network I/O. Running it on the tokio
+/// runtime directly would stall other async tasks for the duration of the git
+/// protocol handshake, so we hop to a blocking thread.
 async fn fetch_releases_blocking(filter: ReleasesFilter) -> Result<Vec<Version>> {
     match tokio::task::spawn_blocking(move || releases::get_all(WASMEDGE_GIT_URL, filter)).await {
         Ok(inner) => inner,
@@ -731,6 +769,16 @@ mod tests {
 
     fn v(s: &str) -> Version {
         Version::parse(s).expect("valid semver")
+    }
+
+    #[test]
+    fn selects_displayed_releases_and_stable_candidates_from_one_result() {
+        let candidates = vec![v("1.2.0-rc.1"), v("1.1.0"), v("1.0.0"), v("0.9.0-beta.1")];
+
+        let (displayed, stable) = select_release_listing(candidates, ReleasesFilter::All, 2);
+
+        assert_eq!(displayed, vec![v("1.2.0-rc.1"), v("1.1.0")]);
+        assert_eq!(stable, vec![v("1.1.0"), v("1.0.0")]);
     }
 
     fn cached_http_client_timeouts() -> Option<(u64, u64)> {
@@ -1316,6 +1364,22 @@ mod tests {
             .await
             .expect_err("no candidate is published");
         assert!(matches!(err, Error::NoPublishedReleasesFound), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn first_published_caps_publication_probes() {
+        let server = StubServer::start();
+        let candidates = (0..11)
+            .rev()
+            .map(|patch| (Version::new(1, 0, patch), server.url("/404/200/SHA256SUM")))
+            .collect();
+
+        let err = WasmEdgeApiClient::first_published(&Client::new(), candidates)
+            .await
+            .expect_err("no candidate is published");
+
+        assert!(matches!(err, Error::NoPublishedReleasesFound), "{err:?}");
+        assert_eq!(server.paths().len(), 10);
     }
 
     #[tokio::test]
