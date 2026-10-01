@@ -1,17 +1,21 @@
 use std::{
-    fs::OpenOptions,
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
 };
 
+use cap_primitives::fs::FollowSymlinks;
+use cap_std::fs::{Dir, OpenOptions};
 use clap::Parser;
 use tokio::fs;
 
 use crate::{
     api::{Asset, WasmEdgeApiClient},
     cli::{CommandContext, CommandExecutor},
-    commands::{normalize_absolute_path, resolve_install_path},
-    constants::{VERSION_INSTALL_MARKER, VERSION_INSTALL_MARKER_CONTENT},
+    commands::resolve_normalized_install_path,
+    constants::{
+        VERSION_INSTALL_MARKER, VERSION_INSTALL_MARKER_CONTENT, VERSION_STAGING_MARKER,
+        VERSION_STAGING_MARKER_CONTENT,
+    },
     prelude::*,
     shell_utils,
     target::{TargetArch, TargetOS},
@@ -92,6 +96,8 @@ impl CommandExecutor for InstallArgs {
         tracing::debug!(?os, ?arch, "Host OS and architecture detected");
 
         let asset = Asset::new(&version, os, arch);
+        let target_dir = resolve_normalized_install_path(self.path.take())?;
+        shell_utils::validate_shell_configuration_path(&target_dir)?;
 
         // Stage this installation in an isolated temporary workspace with a
         // randomized name (see `create_temp_workspace`) for isolation between
@@ -140,49 +146,35 @@ impl CommandExecutor for InstallArgs {
             .inspect_err(|e| tracing::error!(error = %e.to_string(), "Failed to extract asset"))?;
         tracing::debug!(dest = %tmpdir.display(), "Extraction completed successfully");
 
-        let target_dir = normalize_absolute_path(&resolve_install_path(self.path)?)?;
-
-        if target_dir.exists() {
-            if crate::fs::can_write_to_directory(&target_dir) {
-                tracing::debug!(target_dir = %target_dir.display(), "Verified write permissions");
-            } else {
+        let install_root = match crate::fs::open_or_create_dir_nofollow(&target_dir) {
+            Ok(install_root) => install_root,
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                tracing::debug!(%error, path = %target_dir.display(), "Cannot create or open target directory");
                 return Err(crate::commands::insufficient_permissions(
                     &target_dir,
-                    "write to target directory",
+                    "create or open target directory",
                     &version.to_string(),
                 ));
             }
-        } else {
-            match fs::create_dir_all(&target_dir).await {
-                Ok(_) => {
-                    if !crate::fs::can_write_to_directory(&target_dir) {
-                        tracing::debug!(path = %target_dir.display(), "Created directory but cannot write to it");
-                        return Err(crate::commands::insufficient_permissions(
-                            &target_dir,
-                            "write to target directory",
-                            &version.to_string(),
-                        ));
-                    }
-                    tracing::debug!(target_dir = %target_dir.display(), "Created target directory");
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, path = %target_dir.display(), "Failed to create directory");
-                    return Err(crate::commands::insufficient_permissions(
-                        &target_dir,
-                        "create directory",
-                        &version.to_string(),
-                    ));
-                }
+            Err(error) => {
+                return Err(Error::InvalidPath {
+                    path: target_dir.display().to_string(),
+                    reason: format!(
+                        "the install root must be a real directory opened without following \
+                         symlinks: {error}"
+                    ),
+                });
             }
+        };
+        if !crate::fs::can_write_to_cap_directory(&install_root) {
+            tracing::debug!(path = %target_dir.display(), "Cannot write to target directory");
+            return Err(crate::commands::insufficient_permissions(
+                &target_dir,
+                "write to target directory",
+                &version.to_string(),
+            ));
         }
-
-        let versions_dir = target_dir.join("versions");
-        fs::create_dir_all(&versions_dir).await.inspect_err(
-            |e| tracing::error!(error = %e.to_string(), "Failed to create versions directory"),
-        )?;
-        let version_dir = versions_dir.join(version.to_string());
-        claim_version_directory(&version_dir)?;
-        tracing::debug!(version_dir = %version_dir.display(), "Created version directory");
+        tracing::debug!(target_dir = %target_dir.display(), "Verified target directory");
 
         let mut read_dir = fs::read_dir(&tmpdir).await?;
         let mut source_dir = tmpdir.clone();
@@ -204,8 +196,38 @@ impl CommandExecutor for InstallArgs {
             });
         }
 
+        let versions_dir = target_dir.join("versions");
+        let versions_root =
+            crate::fs::open_or_create_cap_dir_nofollow(&install_root, Path::new("versions"))
+                .map_err(|error| Error::InvalidPath {
+                    path: versions_dir.display().to_string(),
+                    reason: format!(
+                        "the versions path must be a real directory opened without following \
+                         symlinks: {error}"
+                    ),
+                })?;
+        let version_name = version.to_string();
+        let version_dir = versions_dir.join(&version_name);
+        let (version_root, staged_version) =
+            claim_version_directory(&versions_root, Path::new(&version_name), &version_dir)?;
+        tracing::debug!(version_dir = %version_dir.display(), "Claimed version directory");
+
         tracing::debug!(source_dir = %source_dir.display(), "Start copying files to version directory");
-        crate::fs::copy_tree(&source_dir, &version_dir).await?;
+        crate::fs::copy_tree_to_cap_dir(&source_dir, &version_root, &version_dir).await?;
+        // Keep the exact directory copied above pinned through publication and
+        // activation. On Windows the staging handle itself performs the
+        // handle-relative rename; Unix keeps the open directory across rename.
+        let pinned_version_root = if let Some(staging) = staged_version {
+            publish_version_directory(
+                version_root,
+                staging,
+                &versions_root,
+                Path::new(&version_name),
+                &version_dir,
+            )?
+        } else {
+            version_root
+        };
         tracing::debug!(version_dir = %version_dir.display(), "Copying files to version directory completed");
 
         // The runtime is already copied into `version_dir`, so failing to remove
@@ -216,8 +238,20 @@ impl CommandExecutor for InstallArgs {
         }
 
         tracing::debug!("Creating version symlinks");
-        crate::fs::create_version_symlinks(&target_dir, &version.to_string()).await?;
-        shell_utils::setup_path(&target_dir)?;
+        open_version_directory_for_activation(
+            &versions_root,
+            Path::new(&version_name),
+            &version_dir,
+            &pinned_version_root,
+        )?;
+        crate::fs::create_version_symlinks_in(
+            &install_root,
+            &pinned_version_root,
+            &target_dir,
+            &version_name,
+        )?;
+        shell_utils::setup_path_in(&install_root, &pinned_version_root, &target_dir)?;
+        drop(pinned_version_root);
 
         println!(
             "Installed WasmEdge {version}\nInstall root: {}",
@@ -228,15 +262,18 @@ impl CommandExecutor for InstallArgs {
     }
 }
 
-fn claim_version_directory(version_dir: &Path) -> Result<()> {
-    let created = match std::fs::create_dir(version_dir) {
-        Ok(()) => true,
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => false,
+fn claim_version_directory(
+    versions_root: &Dir,
+    version_name: &Path,
+    version_dir: &Path,
+) -> Result<(Dir, Option<cap_tempfile::TempDir>)> {
+    let metadata = match versions_root.symlink_metadata(version_name) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
 
-    if !created {
-        let metadata = std::fs::symlink_metadata(version_dir)?;
+    if let Some(metadata) = metadata {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(Error::InvalidPath {
                 path: version_dir.display().to_string(),
@@ -245,81 +282,254 @@ fn claim_version_directory(version_dir: &Path) -> Result<()> {
             });
         }
 
-        let marker_is_valid = valid_version_marker(version_dir);
-        let has_runtime = ["bin/wasmedge", "bin/wasmedge.exe"]
-            .into_iter()
-            .any(|binary| {
-                std::fs::symlink_metadata(version_dir.join(binary))
-                    .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-            });
-        if !marker_is_valid && !has_runtime {
+        let version_root = crate::fs::open_cap_dir_nofollow(versions_root, version_name)?;
+        if !valid_version_marker(&version_root)?
+            && !crate::fs::cap_version_has_runtime(&version_root)?
+        {
             return Err(Error::InvalidPath {
                 path: version_dir.display().to_string(),
                 reason: "refusing to claim an existing directory that is not owned by wasmedgeup"
                     .to_string(),
             });
         }
+        write_version_marker(&version_root, version_dir)?;
+        return Ok((version_root, None));
     }
 
-    write_version_marker(version_dir)
+    // Build a new version in a private sibling and publish the complete,
+    // marked directory with one no-replace rename. A crash or copy failure
+    // therefore leaves the final semantic-version path absent rather than an
+    // unowned partial directory that future install/remove commands reject.
+    let staging = cap_tempfile::tempdir_in(versions_root)?;
+    write_version_staging_marker(&staging)?;
+    staging.create_dir("entry")?;
+    #[cfg(windows)]
+    let version_root = crate::fs::open_cap_dir_nofollow_for_rename(&staging, Path::new("entry"))?;
+    #[cfg(not(windows))]
+    let version_root = crate::fs::open_cap_dir_nofollow(&staging, Path::new("entry"))?;
+    write_version_marker(&version_root, version_dir)?;
+    Ok((version_root, Some(staging)))
 }
 
-fn valid_version_marker(version_dir: &Path) -> bool {
-    let marker = version_dir.join(VERSION_INSTALL_MARKER);
-    let Some(metadata) = std::fs::symlink_metadata(&marker).ok() else {
-        return false;
+fn publish_version_directory(
+    version_root: Dir,
+    staging: cap_tempfile::TempDir,
+    versions_root: &Dir,
+    version_name: &Path,
+    version_dir: &Path,
+) -> Result<Dir> {
+    #[cfg(windows)]
+    let pinned_version_root =
+        crate::fs::rename_noreplace_pinned_dir(version_root, versions_root, version_name).map_err(
+            |error| Error::InvalidPath {
+                path: version_dir.display().to_string(),
+                reason: format!(
+                    "the version path changed while the installation was being prepared: {error}"
+                ),
+            },
+        )?;
+    #[cfg(not(windows))]
+    let pinned_version_root = {
+        crate::fs::rename_noreplace(&staging, Path::new("entry"), versions_root, version_name)
+            .map_err(|error| Error::InvalidPath {
+                path: version_dir.display().to_string(),
+                reason: format!(
+                    "the version path changed while the installation was being prepared: {error}"
+                ),
+            })?;
+        version_root
+    };
+
+    #[cfg(unix)]
+    crate::fs::sync_cap_directory(versions_root)?;
+    if let Err(error) = staging.close() {
+        tracing::warn!(%error, "Failed to remove empty version staging directory");
+    }
+    Ok(pinned_version_root)
+}
+
+fn open_version_directory_for_activation(
+    versions_root: &Dir,
+    version_name: &Path,
+    version_dir: &Path,
+    pinned_version_root: &Dir,
+) -> Result<()> {
+    #[cfg(windows)]
+    let activation_handle = same_file::Handle::from_file(
+        crate::fs::open_cap_dir_identity_nofollow(versions_root, version_name).map_err(
+            |error| Error::InvalidPath {
+                path: version_dir.display().to_string(),
+                reason: format!("the version path changed before activation: {error}"),
+            },
+        )?,
+    )?;
+    #[cfg(not(windows))]
+    let activation_handle = {
+        let activation_root = crate::fs::open_cap_dir_nofollow(versions_root, version_name)
+            .map_err(|error| Error::InvalidPath {
+                path: version_dir.display().to_string(),
+                reason: format!("the version path changed before activation: {error}"),
+            })?;
+        same_file::Handle::from_file(activation_root.into_std_file())?
+    };
+
+    let pinned_handle =
+        same_file::Handle::from_file(pinned_version_root.try_clone()?.into_std_file())?;
+    if pinned_handle != activation_handle {
+        return Err(Error::InvalidPath {
+            path: version_dir.display().to_string(),
+            reason: "the version directory was replaced before activation".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn write_version_staging_marker(staging: &Dir) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        ._cap_fs_ext_follow(FollowSymlinks::No);
+    let mut file = staging.open_with(VERSION_STAGING_MARKER, &options)?;
+    file.write_all(VERSION_STAGING_MARKER_CONTENT.as_bytes())?;
+    file.sync_data()?;
+    drop(file);
+
+    #[cfg(unix)]
+    crate::fs::sync_cap_directory(staging)?;
+    Ok(())
+}
+
+fn valid_version_marker(version_dir: &Dir) -> std::io::Result<bool> {
+    let metadata = match version_dir.symlink_metadata(VERSION_INSTALL_MARKER) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
     };
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.len() != VERSION_INSTALL_MARKER_CONTENT.len() as u64
     {
-        return false;
+        return Ok(false);
     }
 
+    let mut options = OpenOptions::new();
+    options.read(true)._cap_fs_ext_follow(FollowSymlinks::No);
+    let file = version_dir.open_with(VERSION_INSTALL_MARKER, &options)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() != VERSION_INSTALL_MARKER_CONTENT.len() as u64 {
+        return Ok(false);
+    }
     let mut content = Vec::with_capacity(VERSION_INSTALL_MARKER_CONTENT.len() + 1);
-    std::fs::File::open(marker)
-        .and_then(|file| {
-            file.take(VERSION_INSTALL_MARKER_CONTENT.len() as u64 + 1)
-                .read_to_end(&mut content)
-        })
-        .is_ok_and(|_| content == VERSION_INSTALL_MARKER_CONTENT.as_bytes())
+    file.take(VERSION_INSTALL_MARKER_CONTENT.len() as u64 + 1)
+        .read_to_end(&mut content)?;
+    Ok(content == VERSION_INSTALL_MARKER_CONTENT.as_bytes())
 }
 
-fn write_version_marker(version_dir: &Path) -> Result<()> {
-    let marker = version_dir.join(VERSION_INSTALL_MARKER);
-    match OpenOptions::new()
+fn write_version_marker(version_dir: &Dir, version_dir_display: &Path) -> Result<()> {
+    match version_dir.symlink_metadata(VERSION_INSTALL_MARKER) {
+        Ok(_) if valid_version_marker(version_dir)? => return Ok(()),
+        Ok(_) => {
+            return Err(Error::InvalidPath {
+                path: version_dir_display
+                    .join(VERSION_INSTALL_MARKER)
+                    .display()
+                    .to_string(),
+                reason: "the wasmedgeup ownership marker is not a regular marker file".to_string(),
+            });
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let marker_staging = cap_tempfile::tempdir_in(version_dir)?;
+    let mut options = OpenOptions::new();
+    options
         .write(true)
         .create_new(true)
-        .open(&marker)
-    {
-        Ok(mut file) => {
-            file.write_all(VERSION_INSTALL_MARKER_CONTENT.as_bytes())?;
-            file.sync_data()?;
-            Ok(())
-        }
+        ._cap_fs_ext_follow(FollowSymlinks::No);
+    let mut file = marker_staging.open_with("marker", &options)?;
+    file.write_all(VERSION_INSTALL_MARKER_CONTENT.as_bytes())?;
+    file.sync_data()?;
+    drop(file);
+
+    match crate::fs::rename_noreplace(
+        &marker_staging,
+        Path::new("marker"),
+        version_dir,
+        Path::new(VERSION_INSTALL_MARKER),
+    ) {
+        Ok(()) => {}
         Err(error)
-            if error.kind() == ErrorKind::AlreadyExists && valid_version_marker(version_dir) =>
-        {
-            Ok(())
+            if error.kind() == ErrorKind::AlreadyExists && valid_version_marker(version_dir)? => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            return Err(Error::InvalidPath {
+                path: version_dir_display
+                    .join(VERSION_INSTALL_MARKER)
+                    .display()
+                    .to_string(),
+                reason: "the wasmedgeup ownership marker changed while it was being created"
+                    .to_string(),
+            });
         }
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => Err(Error::InvalidPath {
-            path: marker.display().to_string(),
-            reason: "the wasmedgeup ownership marker is not a regular marker file".to_string(),
-        }),
-        Err(error) => Err(error.into()),
+        Err(error) => return Err(error.into()),
     }
+
+    #[cfg(unix)]
+    crate::fs::sync_cap_directory(version_dir)?;
+    if let Err(error) = marker_staging.close() {
+        tracing::warn!(%error, "Failed to remove empty marker staging directory");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cap_std::ambient_authority;
+
+    fn open_versions(path: &Path) -> Dir {
+        Dir::open_ambient_dir(path, ambient_authority()).unwrap()
+    }
 
     #[test]
-    fn claim_marks_a_new_version_before_copying() {
+    fn new_version_is_marked_before_atomic_publication() {
         let parent = tempfile::tempdir().unwrap();
         let version_dir = parent.path().join("0.14.1");
+        let versions_root = open_versions(parent.path());
 
-        claim_version_directory(&version_dir).unwrap();
+        let (version_root, staging) =
+            claim_version_directory(&versions_root, Path::new("0.14.1"), &version_dir).unwrap();
+
+        assert!(
+            !version_dir.exists(),
+            "the final path must remain absent while the version is incomplete"
+        );
+        assert!(valid_version_marker(&version_root).unwrap());
+        let staging = staging.expect("new version must be staged");
+        let mut staging_marker = String::new();
+        staging
+            .open(VERSION_STAGING_MARKER)
+            .unwrap()
+            .read_to_string(&mut staging_marker)
+            .unwrap();
+        assert_eq!(staging_marker, VERSION_STAGING_MARKER_CONTENT);
+        let pinned_version_root = publish_version_directory(
+            version_root,
+            staging,
+            &versions_root,
+            Path::new("0.14.1"),
+            &version_dir,
+        )
+        .unwrap();
+        open_version_directory_for_activation(
+            &versions_root,
+            Path::new("0.14.1"),
+            &version_dir,
+            &pinned_version_root,
+        )
+        .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(version_dir.join(VERSION_INSTALL_MARKER)).unwrap(),
@@ -333,10 +543,13 @@ mod tests {
         let version_dir = parent.path().join("0.14.1");
         std::fs::create_dir_all(version_dir.join("bin")).unwrap();
         std::fs::write(version_dir.join("bin/wasmedge"), "runtime").unwrap();
+        let versions_root = open_versions(parent.path());
 
-        claim_version_directory(&version_dir).unwrap();
+        let (version_root, staging) =
+            claim_version_directory(&versions_root, Path::new("0.14.1"), &version_dir).unwrap();
 
-        assert!(valid_version_marker(&version_dir));
+        assert!(staging.is_none());
+        assert!(valid_version_marker(&version_root).unwrap());
     }
 
     #[test]
@@ -345,12 +558,87 @@ mod tests {
         let version_dir = parent.path().join("0.14.1");
         std::fs::create_dir(&version_dir).unwrap();
         std::fs::write(version_dir.join("foreign-data"), "preserve").unwrap();
+        let versions_root = open_versions(parent.path());
 
-        assert!(claim_version_directory(&version_dir).is_err());
+        assert!(
+            claim_version_directory(&versions_root, Path::new("0.14.1"), &version_dir,).is_err()
+        );
         assert_eq!(
             std::fs::read_to_string(version_dir.join("foreign-data")).unwrap(),
             "preserve"
         );
         assert!(!version_dir.join(VERSION_INSTALL_MARKER).exists());
+    }
+
+    #[test]
+    fn activation_accepts_the_claimed_version_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let version_dir = parent.path().join("0.14.1");
+        std::fs::create_dir_all(version_dir.join("bin")).unwrap();
+        std::fs::write(version_dir.join("bin/wasmedge"), "runtime").unwrap();
+        let versions_root = open_versions(parent.path());
+        let (version_root, staging) =
+            claim_version_directory(&versions_root, Path::new("0.14.1"), &version_dir).unwrap();
+
+        assert!(staging.is_none());
+        open_version_directory_for_activation(
+            &versions_root,
+            Path::new("0.14.1"),
+            &version_dir,
+            &version_root,
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_rejects_a_replaced_existing_version_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let version_dir = parent.path().join("0.14.1");
+        std::fs::create_dir_all(version_dir.join("bin")).unwrap();
+        std::fs::write(version_dir.join("bin/wasmedge"), "runtime").unwrap();
+        let versions_root = open_versions(parent.path());
+        let (version_root, staging) =
+            claim_version_directory(&versions_root, Path::new("0.14.1"), &version_dir).unwrap();
+        assert!(staging.is_none());
+
+        std::fs::rename(&version_dir, parent.path().join("claimed-version")).unwrap();
+        std::fs::create_dir(&version_dir).unwrap();
+        std::fs::write(version_dir.join("attacker-runtime"), "replacement").unwrap();
+
+        let result = open_version_directory_for_activation(
+            &versions_root,
+            Path::new("0.14.1"),
+            &version_dir,
+            &version_root,
+        );
+
+        assert!(matches!(result, Err(Error::InvalidPath { .. })));
+        assert_eq!(
+            std::fs::read_to_string(version_dir.join("attacker-runtime")).unwrap(),
+            "replacement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_does_not_follow_a_legacy_bin_symlink() {
+        let parent = tempfile::tempdir().unwrap();
+        let version_dir = parent.path().join("0.14.1");
+        std::fs::create_dir(&version_dir).unwrap();
+
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("wasmedge"), "foreign runtime").unwrap();
+        std::os::unix::fs::symlink(outside.path(), version_dir.join("bin")).unwrap();
+        let versions_root = open_versions(parent.path());
+
+        let result = claim_version_directory(&versions_root, Path::new("0.14.1"), &version_dir);
+
+        assert!(matches!(result, Err(Error::InvalidPath { .. })));
+        assert!(!version_dir.join(VERSION_INSTALL_MARKER).exists());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("wasmedge")).unwrap(),
+            "foreign runtime"
+        );
     }
 }

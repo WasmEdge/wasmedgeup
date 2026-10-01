@@ -33,3 +33,9 @@ pub const VERSION_INSTALL_MARKER: &str = ".wasmedgeup-managed";
 
 /// Exact marker contents, versioned so future formats can be distinguished safely.
 pub const VERSION_INSTALL_MARKER_CONTENT: &str = "wasmedgeup-managed-version-v1\n";
+
+/// File placed in private version staging directories owned by wasmedgeup.
+pub const VERSION_STAGING_MARKER: &str = ".wasmedgeup-version-staging";
+
+/// Exact staging marker contents, versioned for safe cleanup after interrupted installs.
+pub const VERSION_STAGING_MARKER_CONTENT: &str = "wasmedgeup-version-staging-v1\n";

@@ -80,8 +80,15 @@ fn plugin_filename_for(name: &str) -> String {
 }
 
 async fn setup_mock_runtime_with_plugins(root: &Path, version: &str, plugins: &[&str]) -> PathBuf {
-    let plugin_dir = root.join("versions").join(version).join("plugin");
+    let version_dir = root.join("versions").join(version);
+    let plugin_dir = version_dir.join("plugin");
     tokio::fs::create_dir_all(&plugin_dir).await.unwrap();
+    tokio::fs::create_dir_all(version_dir.join("bin"))
+        .await
+        .unwrap();
+    tokio::fs::write(version_dir.join("bin/wasmedge"), "mock runtime")
+        .await
+        .unwrap();
 
     for n in plugins {
         let fname = plugin_filename_for(n);
@@ -176,7 +183,12 @@ async fn test_plugin_remove_when_no_plugin_dir() {
     let (_tmp, home) = test_utils::setup_test_environment();
     let version = "0.14.1";
     let version_dir = home.join("versions").join(version);
-    tokio::fs::create_dir_all(&version_dir).await.unwrap();
+    tokio::fs::create_dir_all(version_dir.join("bin"))
+        .await
+        .unwrap();
+    tokio::fs::write(version_dir.join("bin/wasmedge"), "mock runtime")
+        .await
+        .unwrap();
 
     let args = PluginRemoveArgs {
         plugins: vec!["wasi_nn".parse().unwrap()],
@@ -192,5 +204,34 @@ async fn test_plugin_remove_when_no_plugin_dir() {
     assert!(
         !version_dir.join("plugin").exists(),
         "no plugin dir should be created by remove"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_plugin_remove_rejects_unowned_semver_directory() {
+    let (_tmp, home) = test_utils::setup_test_environment();
+    let version = "9.9.9";
+    let plugin_dir = home.join("versions").join(version).join("plugin");
+    tokio::fs::create_dir_all(&plugin_dir).await.unwrap();
+    let foreign_plugin = plugin_dir.join(plugin_filename_for("wasi_nn"));
+    tokio::fs::write(&foreign_plugin, "unrelated data")
+        .await
+        .unwrap();
+
+    let args = PluginRemoveArgs {
+        plugins: vec!["wasi_nn".parse().unwrap()],
+        runtime: Some(version.to_string()),
+        path: Some(home),
+    };
+    let result = args.execute(CommandContext::default()).await;
+
+    assert!(matches!(
+        result,
+        Err(wasmedgeup::error::Error::VersionNotFound { .. })
+    ));
+    assert_eq!(
+        tokio::fs::read_to_string(foreign_plugin).await.unwrap(),
+        "unrelated data"
     );
 }

@@ -5,7 +5,10 @@ use wasmedgeup::{
     api::{latest_installed_version, WasmEdgeApiClient},
     cli::{CommandContext, CommandExecutor},
     commands::remove::RemoveArgs,
-    constants::{VERSION_INSTALL_MARKER, VERSION_INSTALL_MARKER_CONTENT},
+    constants::{
+        VERSION_INSTALL_MARKER, VERSION_INSTALL_MARKER_CONTENT, VERSION_STAGING_MARKER,
+        VERSION_STAGING_MARKER_CONTENT,
+    },
     error::Error,
     shell_utils,
 };
@@ -200,16 +203,17 @@ async fn test_remove_current_preserves_unmanaged_links_when_switching() {
 #[cfg(unix)]
 #[tokio::test]
 #[serial]
-async fn test_remove_retargets_each_link_that_points_to_removed_version() {
+async fn test_remove_current_retargets_all_managed_links_to_replacement() {
     use std::os::unix::fs::symlink;
 
     let (_tempdir, home_dir) = test_utils::setup_test_environment();
     let test_home = home_dir.join(".wasmedge");
-    setup_mock_version(&test_home.join("versions").join("0.15.0"), "0.15.0").await;
     setup_mock_version(&test_home.join("versions").join("0.14.1"), "0.14.1").await;
+    setup_mock_version(&test_home.join("versions").join("0.15.0"), "0.15.0").await;
+    setup_mock_version(&test_home.join("versions").join("0.13.0"), "0.13.0").await;
 
     let include_link = test_home.join("include");
-    symlink("versions/0.14.1/include", &include_link).unwrap();
+    symlink("versions/0.13.0/include", &include_link).unwrap();
 
     RemoveArgs {
         version: "0.14.1".to_string(),
@@ -223,15 +227,102 @@ async fn test_remove_retargets_each_link_that_points_to_removed_version() {
     .await
     .unwrap();
 
+    for name in ["bin", "include"] {
+        assert_eq!(
+            std::fs::read_link(test_home.join(name)).unwrap(),
+            Path::new("versions").join("0.15.0").join(name),
+            "switching the current version must retarget every managed link"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_remove_with_unusable_current_retargets_all_managed_links() {
+    use std::os::unix::fs::symlink;
+
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
+    setup_mock_version(&test_home.join("versions/0.13.0"), "0.13.0").await;
+    setup_mock_version(&test_home.join("versions/0.14.1"), "0.14.1").await;
+    setup_mock_version(&test_home.join("versions/0.15.0"), "0.15.0").await;
+
+    let partial_version = test_home.join("versions/0.16.0");
+    tokio::fs::create_dir_all(&partial_version).await.unwrap();
+    tokio::fs::write(
+        partial_version.join(VERSION_INSTALL_MARKER),
+        VERSION_INSTALL_MARKER_CONTENT,
+    )
+    .await
+    .unwrap();
+
+    std::fs::remove_file(test_home.join("bin")).unwrap();
+    symlink("versions/0.16.0/bin", test_home.join("bin")).unwrap();
+    symlink("versions/0.14.1/include", test_home.join("include")).unwrap();
+    symlink("versions/0.13.0/lib", test_home.join("lib")).unwrap();
+
+    RemoveArgs {
+        version: "0.13.0".to_string(),
+        all: false,
+        path: Some(test_home.clone()),
+    }
+    .execute(CommandContext {
+        client: WasmEdgeApiClient::default(),
+        no_progress: true,
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        partial_version.exists(),
+        "the unusable marker-owned version must remain available for explicit cleanup"
+    );
+    for name in ["bin", "lib", "include", "plugin"] {
+        assert_eq!(
+            std::fs::read_link(test_home.join(name)).unwrap(),
+            Path::new("versions").join("0.15.0").join(name),
+            "an unusable current version must trigger a complete managed-link switch"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_remove_retargets_stale_links_to_the_current_version() {
+    use std::os::unix::fs::symlink;
+
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
+    setup_mock_version(&test_home.join("versions").join("0.14.1"), "0.14.1").await;
+    setup_mock_version(&test_home.join("versions").join("0.15.0"), "0.15.0").await;
+    setup_mock_version(&test_home.join("versions").join("0.13.0"), "0.13.0").await;
+
+    let include_link = test_home.join("include");
+    symlink("versions/0.13.0/include", &include_link).unwrap();
+
+    RemoveArgs {
+        version: "0.13.0".to_string(),
+        all: false,
+        path: Some(test_home.clone()),
+    }
+    .execute(CommandContext {
+        client: WasmEdgeApiClient::default(),
+        no_progress: true,
+    })
+    .await
+    .unwrap();
+
     assert_eq!(
         std::fs::read_link(test_home.join("bin")).unwrap(),
-        Path::new("versions/0.15.0/bin"),
-        "a link to another managed version must remain unchanged"
+        Path::new("versions/0.14.1/bin"),
+        "the current link must remain on the active version"
     );
     assert_eq!(
         std::fs::read_link(include_link).unwrap(),
-        Path::new("versions/0.15.0/include"),
-        "each managed link to the removed version must be retargeted"
+        Path::new("versions/0.14.1/include"),
+        "stale links must be retargeted to the active version instead of the highest version"
     );
     for name in ["lib", "plugin"] {
         assert!(
@@ -459,6 +550,43 @@ async fn test_remove_all_removes_marker_owned_partial_install() {
     assert!(
         !partial_version.exists(),
         "an installer-owned partial version must be removable"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remove_all_removes_interrupted_version_staging() {
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
+    let staging_dir = test_home.join("versions").join("interrupted-staging");
+    tokio::fs::create_dir_all(staging_dir.join("entry/bin"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        staging_dir.join(VERSION_STAGING_MARKER),
+        VERSION_STAGING_MARKER_CONTENT,
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(staging_dir.join("entry/bin/partial-runtime"), "partial")
+        .await
+        .unwrap();
+
+    RemoveArgs {
+        version: String::new(),
+        all: true,
+        path: Some(test_home.clone()),
+    }
+    .execute(CommandContext {
+        client: WasmEdgeApiClient::default(),
+        no_progress: true,
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        !test_home.exists(),
+        "an interrupted installer staging directory must not keep the install root alive"
     );
 }
 

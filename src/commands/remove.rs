@@ -1,33 +1,37 @@
 use std::{
-    io::{self, ErrorKind, Read},
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
-use cap_primitives::fs::FollowSymlinks;
-use cap_std::{
-    ambient_authority,
-    fs::{Dir, OpenOptions},
-};
+#[cfg(windows)]
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 use clap::Parser;
 use semver::Version;
 
 use crate::{
     cli::{CommandContext, CommandExecutor},
-    commands::{normalize_absolute_path, resolve_install_path},
-    constants::{VERSION_INSTALL_MARKER, VERSION_INSTALL_MARKER_CONTENT},
+    commands::{
+        normalize_absolute_path, resolve_install_path,
+        runtime::{
+            cap_file_matches, latest_usable_managed_version, managed_version_is_usable,
+            managed_versions, open_managed_version_dir,
+        },
+    },
+    constants::{VERSION_STAGING_MARKER, VERSION_STAGING_MARKER_CONTENT},
     error::join_err_to_io_error,
+    fs::{
+        open_cap_dir_nofollow, open_dir_nofollow as open_install_root, quarantine_entry,
+        restore_quarantined_entry,
+    },
     prelude::*,
-    shell_utils::uninstall_path_configuration,
+    shell_utils::{remove_managed_shell_scripts, uninstall_path_configuration},
 };
 
 #[cfg(all(test, unix))]
 use crate::shell_utils::managed_shell_script_content;
-#[cfg(unix)]
-use crate::shell_utils::managed_shell_script_install_path;
 
 const MANAGED_ROOT_LINKS: [&str; 4] = ["bin", "include", "lib", "plugin"];
-#[cfg(unix)]
-const MAX_MANAGED_SHELL_SCRIPT_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone)]
 struct ManagedRootLink {
@@ -121,18 +125,24 @@ impl CommandExecutor for RemoveArgs {
                 &install_root,
                 &versions_root,
                 &target_dir,
+                &configured_target_dir,
                 &managed_versions,
             )?;
             remove_all_versions(&versions_root, &managed_versions).await?;
-            cleanup_shell_integration(
+            remove_managed_version_staging_directories(&versions_root).await?;
+            let shell_cleanup = cleanup_shell_integration(
                 &install_root,
                 &target_dir,
                 &configured_target_dir,
                 "during --all removal",
+            );
+            finish_install_cleanup(
+                shell_cleanup,
+                install_root,
+                versions_root,
+                &target_dir,
+                &managed_links,
             )?;
-            remove_open_dir_if_empty(versions_root)?;
-            cleanup_managed_root_entries(&install_root, &target_dir, &managed_links)?;
-            remove_open_dir_if_empty(install_root)?;
             tracing::info!("All versions and configuration removed successfully");
             return Ok(());
         }
@@ -142,6 +152,7 @@ impl CommandExecutor for RemoveArgs {
             &install_root,
             &versions_root,
             &target_dir,
+            &configured_target_dir,
             &managed_versions_before,
         )?;
         let current_version = managed_links_before
@@ -192,15 +203,19 @@ impl CommandExecutor for RemoveArgs {
         if latest_version.is_none() {
             let partial_versions_remain = !managed_versions(&versions_root)?.is_empty();
             tracing::debug!("No usable versions remaining, cleaning up configuration");
-            cleanup_shell_integration(
+            let shell_cleanup = cleanup_shell_integration(
                 &install_root,
                 &target_dir,
                 &configured_target_dir,
                 "when cleaning up last version",
+            );
+            finish_install_cleanup(
+                shell_cleanup,
+                install_root,
+                versions_root,
+                &target_dir,
+                &managed_links_before,
             )?;
-            remove_open_dir_if_empty(versions_root)?;
-            cleanup_managed_root_entries(&install_root, &target_dir, &managed_links_before)?;
-            remove_open_dir_if_empty(install_root)?;
             if partial_versions_remain {
                 tracing::info!(
                     "No usable versions remain; configuration removed and partial installs preserved"
@@ -213,16 +228,25 @@ impl CommandExecutor for RemoveArgs {
 
         if removed {
             let latest_version = latest_version.expect("checked above");
+            let active_version = match current_version.as_ref() {
+                Some(current_version) if !removed_current => {
+                    managed_version_is_usable(&versions_root, current_version)?
+                        .then_some(current_version)
+                }
+                _ => None,
+            };
+            let switch_current_version = current_version.is_some() && active_version.is_none();
+            let replacement_version = active_version.unwrap_or(&latest_version);
             retarget_removed_version_links(
                 &install_root,
                 &target_dir,
                 &version,
-                &latest_version,
+                replacement_version,
                 &managed_links_before,
-                removed_current,
+                switch_current_version,
             )?;
 
-            if removed_current {
+            if switch_current_version {
                 tracing::info!(version = %latest_version, "Switching to latest version");
                 println!("Switched to WasmEdge runtime version: {latest_version}");
             }
@@ -230,48 +254,6 @@ impl CommandExecutor for RemoveArgs {
 
         Ok(())
     }
-}
-
-fn open_install_root(path: &Path) -> io::Result<Dir> {
-    let root = path
-        .ancestors()
-        .filter(|ancestor| ancestor.has_root())
-        .last()
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "path has no filesystem root"))?;
-    let relative = path.strip_prefix(root).map_err(|_| {
-        io::Error::new(
-            ErrorKind::InvalidInput,
-            "path could not be made relative to its filesystem root",
-        )
-    })?;
-    let mut current = Dir::open_ambient_dir(root, ambient_authority())?;
-    let mut opened_component = false;
-
-    for component in relative.components() {
-        let std::path::Component::Normal(name) = component else {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "install path must contain only normalized components",
-            ));
-        };
-        current = open_cap_dir_nofollow(&current, Path::new(name))?;
-        opened_component = true;
-    }
-
-    if !opened_component {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "the install root must not be a filesystem root",
-        ));
-    }
-
-    Ok(current)
-}
-
-fn open_cap_dir_nofollow(parent: &Dir, path: &Path) -> io::Result<Dir> {
-    let parent_file = parent.try_clone()?.into_std_file();
-    let dir = cap_primitives::fs::open_dir_nofollow(&parent_file, path)?;
-    Ok(Dir::from_std_file(dir))
 }
 
 async fn remove_all_versions(versions_dir: &Dir, managed_versions: &[Version]) -> Result<()> {
@@ -286,118 +268,36 @@ async fn remove_all_versions(versions_dir: &Dir, managed_versions: &[Version]) -
     Ok(())
 }
 
-fn managed_versions(versions_dir: &Dir) -> Result<Vec<Version>> {
-    let mut versions = Vec::new();
+async fn remove_managed_version_staging_directories(versions_dir: &Dir) -> Result<()> {
+    let mut staging_dirs = Vec::new();
 
     for entry in versions_dir.entries()? {
         let entry = entry?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+        let file_type = entry.file_type()?;
+        if !file_type.is_dir() || file_type.is_symlink() {
             continue;
-        };
-        let Ok(version) = Version::parse(&name) else {
-            continue;
-        };
+        }
 
-        if entry.file_type()?.is_dir()
-            && open_managed_version_dir(versions_dir, Path::new(&name))?.is_some()
-        {
-            versions.push(version);
-        } else {
-            tracing::debug!(version = %name, "Preserving unowned semantic-version entry");
+        let name = PathBuf::from(entry.file_name());
+        let staging_dir = match open_cap_dir_nofollow(versions_dir, &name) {
+            Ok(staging_dir) => staging_dir,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if cap_file_matches(
+            &staging_dir,
+            VERSION_STAGING_MARKER,
+            VERSION_STAGING_MARKER_CONTENT,
+        )? {
+            staging_dirs.push((name, staging_dir));
         }
     }
 
-    Ok(versions)
-}
-
-fn latest_usable_managed_version(versions_dir: &Dir) -> Result<Option<Version>> {
-    let mut latest = None;
-
-    for version in managed_versions(versions_dir)? {
-        let name = version.to_string();
-        let Some(version_dir) = open_managed_version_dir(versions_dir, Path::new(&name))? else {
-            continue;
-        };
-        if cap_version_has_runtime(&version_dir)?
-            && latest.as_ref().is_none_or(|current| version > *current)
-        {
-            latest = Some(version);
-        }
+    for (name, staging_dir) in staging_dirs {
+        remove_version_dir(staging_dir).await?;
+        tracing::debug!(path = %name.display(), "Removed interrupted version staging directory");
     }
-
-    Ok(latest)
-}
-
-fn open_managed_version_dir(versions_dir: &Dir, name: &Path) -> Result<Option<Dir>> {
-    let metadata = match versions_dir.symlink_metadata(name) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Ok(None);
-    }
-
-    let version_dir = open_cap_dir_nofollow(versions_dir, name)?;
-    if cap_file_matches(
-        &version_dir,
-        VERSION_INSTALL_MARKER,
-        VERSION_INSTALL_MARKER_CONTENT,
-    )? {
-        return Ok(Some(version_dir));
-    }
-
-    if cap_version_has_runtime(&version_dir)? {
-        return Ok(Some(version_dir));
-    }
-
-    Ok(None)
-}
-
-fn cap_version_has_runtime(version_dir: &Dir) -> io::Result<bool> {
-    for binary in ["bin/wasmedge", "bin/wasmedge.exe"] {
-        match version_dir.symlink_metadata(binary) {
-            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                return Ok(true);
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-
-    Ok(false)
-}
-
-fn cap_file_matches(dir: &Dir, name: &str, expected: &str) -> io::Result<bool> {
-    let metadata = match dir.symlink_metadata(name) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() != expected.len() as u64
-    {
-        return Ok(false);
-    }
-
-    let mut options = OpenOptions::new();
-    options.read(true)._cap_fs_ext_follow(FollowSymlinks::No);
-    let file = match dir.open_with(name, &options) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() != expected.len() as u64 {
-        return Ok(false);
-    }
-
-    let mut content = Vec::with_capacity(expected.len() + 1);
-    file.take(expected.len() as u64 + 1)
-        .read_to_end(&mut content)?;
-    Ok(content == expected.as_bytes())
+    Ok(())
 }
 
 async fn remove_version_dir(version_dir: Dir) -> Result<()> {
@@ -413,14 +313,15 @@ fn retarget_removed_version_links(
     removed_version: &Version,
     replacement_version: &Version,
     managed_links: &[ManagedRootLink],
-    create_missing: bool,
+    switch_current_version: bool,
 ) -> Result<()> {
     for name in MANAGED_ROOT_LINKS {
         let display_path = target_dir.join(name);
         let managed_link = managed_links.iter().find(|link| link.name == name);
-        let replace = managed_link.is_some_and(|link| link.version == *removed_version);
+        let replace = managed_link
+            .is_some_and(|link| switch_current_version || link.version == *removed_version);
 
-        if !replace && !(create_missing && managed_link.is_none()) {
+        if !replace && !(switch_current_version && managed_link.is_none()) {
             tracing::debug!(path = %display_path.display(), "Preserving unmanaged install-root entry");
             continue;
         }
@@ -430,7 +331,7 @@ fn retarget_removed_version_links(
             _ => false,
         };
         if !removed {
-            if create_missing
+            if switch_current_version
                 && install_root
                     .symlink_metadata(name)
                     .is_err_and(|error| error.kind() == ErrorKind::NotFound)
@@ -475,6 +376,7 @@ fn managed_root_links(
     install_root: &Dir,
     versions_root: &Dir,
     target_dir: &Path,
+    configured_target_dir: &Path,
     managed_versions: &[Version],
 ) -> Result<Vec<ManagedRootLink>> {
     let mut links = Vec::new();
@@ -490,9 +392,14 @@ fn managed_root_links(
         }
 
         let target = install_root.read_link_contents(name)?;
-        if let Some(version) =
-            root_link_target_version(versions_root, target_dir, name, &target, managed_versions)?
-        {
+        if let Some(version) = root_link_target_version(
+            versions_root,
+            target_dir,
+            configured_target_dir,
+            name,
+            &target,
+            managed_versions,
+        )? {
             links.push(ManagedRootLink {
                 name,
                 version,
@@ -507,11 +414,14 @@ fn managed_root_links(
 fn root_link_target_version(
     versions_root: &Dir,
     target_dir: &Path,
+    configured_target_dir: &Path,
     name: &str,
     link_target: &Path,
     managed_versions: &[Version],
 ) -> Result<Option<Version>> {
-    if let Some(version) = lexical_root_link_target_version(target_dir, name, link_target) {
+    if let Some(version) =
+        lexical_root_link_target_version(target_dir, configured_target_dir, name, link_target)
+    {
         return Ok(managed_versions.contains(&version).then_some(version));
     }
 
@@ -534,15 +444,30 @@ fn root_link_target_version(
 
 fn lexical_root_link_target_version(
     target_dir: &Path,
+    configured_target_dir: &Path,
     name: &str,
     link_target: &Path,
 ) -> Option<Version> {
     let relative_target = if link_target.is_absolute() {
         link_target.strip_prefix(target_dir).ok()?
-    } else {
+    } else if parse_relative_root_link_target(name, link_target).is_some() {
         link_target
+    } else {
+        #[cfg(windows)]
+        {
+            link_target.strip_prefix(configured_target_dir).ok()?
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = configured_target_dir;
+            return None;
+        }
     };
 
+    parse_relative_root_link_target(name, relative_target)
+}
+
+fn parse_relative_root_link_target(name: &str, relative_target: &Path) -> Option<Version> {
     let mut components = relative_target.components();
     let (
         Some(std::path::Component::Normal(versions)),
@@ -578,7 +503,10 @@ fn windows_root_link_target_version(
     let Some(link_name) = link_target.file_name().and_then(|value| value.to_str()) else {
         return Ok(None);
     };
-    if !link_target.is_absolute() || !link_name.eq_ignore_ascii_case(name) {
+    if !link_target.is_absolute()
+        || !is_local_windows_path(link_target)
+        || !link_name.eq_ignore_ascii_case(name)
+    {
         return Ok(None);
     }
     let Some(link_parent) = link_target.parent() else {
@@ -602,6 +530,17 @@ fn windows_root_link_target_version(
     }
 
     Ok(None)
+}
+
+#[cfg(windows)]
+fn is_local_windows_path(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    )
 }
 
 fn quarantine_managed_root_link(
@@ -628,133 +567,6 @@ fn quarantine_managed_root_link(
     Ok(true)
 }
 
-fn quarantine_entry(install_root: &Dir, name: &str) -> io::Result<Option<cap_tempfile::TempDir>> {
-    let quarantine = cap_tempfile::tempdir_in(install_root)?;
-    match install_root.rename(name, &quarantine, "entry") {
-        Ok(()) => Ok(Some(quarantine)),
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            quarantine.close()?;
-            Ok(None)
-        }
-        Err(error) => {
-            quarantine.close()?;
-            Err(error)
-        }
-    }
-}
-
-fn restore_quarantined_entry(
-    quarantine: cap_tempfile::TempDir,
-    install_root: &Dir,
-    name: &str,
-) -> io::Result<()> {
-    if let Err(error) = rename_noreplace(
-        &quarantine,
-        Path::new("entry"),
-        install_root,
-        Path::new(name),
-    ) {
-        std::mem::forget(quarantine);
-        return Err(io::Error::new(
-            error.kind(),
-            format!(
-                "install-root entry changed during cleanup; the original {name} entry was \
-                 preserved in an internal quarantine directory: {error}"
-            ),
-        ));
-    }
-    quarantine.close()
-}
-
-#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-fn rename_noreplace(from_dir: &Dir, from: &Path, to_dir: &Dir, to: &Path) -> io::Result<()> {
-    rustix::fs::renameat_with(
-        from_dir,
-        from,
-        to_dir,
-        to,
-        rustix::fs::RenameFlags::NOREPLACE,
-    )
-    .map_err(io::Error::from)
-}
-
-#[cfg(windows)]
-fn rename_noreplace(from_dir: &Dir, from: &Path, to_dir: &Dir, to: &Path) -> io::Result<()> {
-    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
-
-    let from = windows_child_path(from_dir, from)?;
-    let to = windows_child_path(to_dir, to)?;
-
-    // SAFETY: Both paths are NUL-terminated UTF-16 buffers that remain alive for the call.
-    // Passing no flags gives MoveFileExW no replace-existing permission, so a concurrent
-    // destination entry makes the operation fail instead of being overwritten.
-    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn windows_child_path(dir: &Dir, child: &Path) -> io::Result<Vec<u16>> {
-    use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
-    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
-
-    let mut components = child.components();
-    let Some(std::path::Component::Normal(name)) = components.next() else {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "rename path must be one normal component",
-        ));
-    };
-    if components.next().is_some() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "rename path must be one normal component",
-        ));
-    }
-
-    let mut path = vec![0_u16; 512];
-    loop {
-        // SAFETY: `path` is a writable UTF-16 buffer and the directory handle remains valid.
-        let written = unsafe {
-            GetFinalPathNameByHandleW(
-                dir.as_raw_handle(),
-                path.as_mut_ptr(),
-                path.len().try_into().map_err(|_| {
-                    io::Error::new(ErrorKind::InvalidInput, "directory path is too long")
-                })?,
-                0,
-            )
-        };
-        if written == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if (written as usize) < path.len() {
-            path.truncate(written as usize);
-            break;
-        }
-        path.resize(written as usize + 1, 0);
-    }
-
-    if !path.ends_with(&[b'\\' as u16]) {
-        path.push(b'\\' as u16);
-    }
-    path.extend(name.encode_wide());
-    path.push(0);
-    Ok(path)
-}
-
-#[cfg(all(
-    unix,
-    not(any(target_os = "linux", target_os = "android", target_vendor = "apple"))
-))]
-fn rename_noreplace(_from_dir: &Dir, _from: &Path, _to_dir: &Dir, _to: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        ErrorKind::Unsupported,
-        "atomic no-replace rename is unavailable on this platform",
-    ))
-}
-
 fn remove_open_dir_if_empty(dir: Dir) -> Result<bool> {
     match dir.remove_open_dir() {
         Ok(()) => Ok(true),
@@ -770,6 +582,43 @@ fn remove_open_dir_if_empty(dir: Dir) -> Result<bool> {
     }
 }
 
+fn finish_install_cleanup(
+    shell_cleanup: Result<()>,
+    install_root: Dir,
+    versions_root: Dir,
+    target_dir: &Path,
+    managed_links: &[ManagedRootLink],
+) -> Result<()> {
+    // These operations clean up independent entries. Run each one even when
+    // an earlier step fails so a restored or unreadable env script cannot
+    // leave managed root links pointing at versions that were already removed.
+    let links_cleanup = cleanup_managed_root_entries(&install_root, target_dir, managed_links);
+    finish_install_cleanup_after_links(shell_cleanup, links_cleanup, install_root, versions_root)
+}
+
+fn finish_install_cleanup_after_links(
+    shell_cleanup: Result<()>,
+    links_cleanup: Result<()>,
+    install_root: Dir,
+    versions_root: Dir,
+) -> Result<()> {
+    let versions_cleanup = if shell_cleanup.is_ok() && links_cleanup.is_ok() {
+        remove_open_dir_if_empty(versions_root)
+    } else {
+        // Keep the versions directory as a retry marker. Without it, a later
+        // remove invocation would reject the remaining managed shell script or
+        // root link as an absent installation before it could retry cleanup.
+        Ok(false)
+    };
+    let root_cleanup = remove_open_dir_if_empty(install_root);
+
+    shell_cleanup?;
+    links_cleanup?;
+    versions_cleanup?;
+    root_cleanup?;
+    Ok(())
+}
+
 fn cleanup_shell_integration(
     install_root: &Dir,
     target_dir: &Path,
@@ -777,7 +626,11 @@ fn cleanup_shell_integration(
     context: &str,
 ) -> Result<()> {
     let mut configuration_paths = vec![configured_target_dir.to_path_buf()];
-    for path in remove_managed_shell_scripts(install_root, target_dir)? {
+    if target_dir != configured_target_dir {
+        configuration_paths.push(target_dir.to_path_buf());
+    }
+    let cleanup = remove_managed_shell_scripts(install_root, target_dir, configured_target_dir);
+    for path in cleanup.configured_paths {
         if !configuration_paths.contains(&path) {
             configuration_paths.push(path);
         }
@@ -793,86 +646,7 @@ fn cleanup_shell_integration(
         }
     }
 
-    Ok(())
-}
-
-#[cfg(unix)]
-fn remove_managed_shell_scripts(install_root: &Dir, target_dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut configured_paths = Vec::new();
-
-    for name in ["env", "env.fish", "env.nu"] {
-        let Some(quarantine) = quarantine_entry(install_root, name)? else {
-            continue;
-        };
-        let configured_path = cap_managed_shell_script_install_path(&quarantine, name, target_dir)?;
-
-        if let Some(configured_path) = configured_path {
-            quarantine.remove_file("entry")?;
-            quarantine.close()?;
-            if !configured_paths.contains(&configured_path) {
-                configured_paths.push(configured_path);
-            }
-        } else {
-            restore_quarantined_entry(quarantine, install_root, name)?;
-            tracing::debug!(%name, "Preserving unowned env script");
-        }
-    }
-
-    Ok(configured_paths)
-}
-
-#[cfg(unix)]
-fn cap_managed_shell_script_install_path(
-    dir: &Dir,
-    name: &str,
-    target_dir: &Path,
-) -> io::Result<Option<PathBuf>> {
-    let metadata = match dir.symlink_metadata("entry") {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() > MAX_MANAGED_SHELL_SCRIPT_BYTES
-    {
-        return Ok(None);
-    }
-
-    let mut options = OpenOptions::new();
-    options.read(true)._cap_fs_ext_follow(FollowSymlinks::No);
-    let file = match dir.open_with("entry", &options) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > MAX_MANAGED_SHELL_SCRIPT_BYTES {
-        return Ok(None);
-    }
-
-    let mut content = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_MANAGED_SHELL_SCRIPT_BYTES + 1)
-        .read_to_end(&mut content)?;
-    if content.len() as u64 > MAX_MANAGED_SHELL_SCRIPT_BYTES {
-        return Ok(None);
-    }
-    let Ok(content) = String::from_utf8(content) else {
-        return Ok(None);
-    };
-    let Some(configured_path) = managed_shell_script_install_path(name, &content) else {
-        return Ok(None);
-    };
-
-    Ok(
-        (normalize_absolute_path(&configured_path).ok().as_deref() == Some(target_dir))
-            .then_some(configured_path),
-    )
-}
-
-#[cfg(windows)]
-fn remove_managed_shell_scripts(_install_root: &Dir, _target_dir: &Path) -> Result<Vec<PathBuf>> {
-    Ok(Vec::new())
+    cleanup.result
 }
 
 #[cfg(unix)]
@@ -916,7 +690,18 @@ fn create_managed_root_link(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use cap_std::ambient_authority;
     use std::os::unix::fs::symlink;
+
+    fn successful_shell_script_cleanup(
+        install_root: &Dir,
+        target_dir: &Path,
+        configured_target_dir: &Path,
+    ) -> Vec<PathBuf> {
+        let cleanup = remove_managed_shell_scripts(install_root, target_dir, configured_target_dir);
+        cleanup.result.unwrap();
+        cleanup.configured_paths
+    }
 
     #[test]
     fn install_root_open_does_not_follow_symlinks() {
@@ -950,6 +735,26 @@ mod tests {
     }
 
     #[test]
+    fn managed_version_probe_does_not_follow_a_symlinked_bin_directory() {
+        let install = tempfile::tempdir().unwrap();
+        let versions_path = install.path().join("versions");
+        let version_path = versions_path.join("0.14.1");
+        std::fs::create_dir_all(&version_path).unwrap();
+
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("wasmedge"), "foreign runtime").unwrap();
+        symlink(outside.path(), version_path.join("bin")).unwrap();
+        let versions_root = Dir::open_ambient_dir(&versions_path, ambient_authority()).unwrap();
+
+        assert!(
+            open_managed_version_dir(&versions_root, Path::new("0.14.1"))
+                .unwrap()
+                .is_none(),
+            "a version with a symlinked bin directory must remain unowned"
+        );
+    }
+
+    #[test]
     fn pinned_shell_script_cleanup_ignores_replaced_install_path() {
         let parent = tempfile::tempdir().unwrap();
         let parent_path = std::fs::canonicalize(parent.path()).unwrap();
@@ -967,7 +772,7 @@ mod tests {
         std::fs::write(&outside_script, "outside data").unwrap();
         symlink(outside_path, &install_path).unwrap();
 
-        remove_managed_shell_scripts(&install_root, &install_path).unwrap();
+        successful_shell_script_cleanup(&install_root, &install_path, &install_path);
 
         assert!(outside_script.exists(), "outside env script must remain");
         assert!(
@@ -986,13 +791,72 @@ mod tests {
         std::fs::write(install_path.join("env"), script).unwrap();
         let install_root = open_install_root(&install_path).unwrap();
 
-        let configured_paths = remove_managed_shell_scripts(&install_root, &install_path).unwrap();
+        let configured_paths =
+            successful_shell_script_cleanup(&install_root, &install_path, &install_path);
 
         assert!(configured_paths.is_empty());
         assert!(
             install_path.join("env").exists(),
             "an official-looking script for another root must be preserved"
         );
+    }
+
+    #[test]
+    fn shell_script_cleanup_recovers_legacy_relative_path_without_resolving_it() {
+        let parent = tempfile::tempdir().unwrap();
+        let install_path = std::fs::canonicalize(parent.path())
+            .unwrap()
+            .join("legacy-root");
+        std::fs::create_dir(&install_path).unwrap();
+        let configured_path = Path::new("./legacy-root");
+        let script = managed_shell_script_content("env", configured_path).unwrap();
+        std::fs::write(install_path.join("env"), script).unwrap();
+        let install_root = open_install_root(&install_path).unwrap();
+
+        let configured_paths =
+            successful_shell_script_cleanup(&install_root, &install_path, configured_path);
+
+        assert_eq!(configured_paths, vec![configured_path.to_path_buf()]);
+        assert!(!install_path.join("env").exists());
+    }
+
+    #[test]
+    fn shell_script_cleanup_preserves_relative_script_without_matching_request_spelling() {
+        let parent = tempfile::tempdir().unwrap();
+        let install_path = std::fs::canonicalize(parent.path())
+            .unwrap()
+            .join("install");
+        std::fs::create_dir(&install_path).unwrap();
+        let script = managed_shell_script_content("env", Path::new("./install")).unwrap();
+        std::fs::write(install_path.join("env"), script).unwrap();
+        let install_root = open_install_root(&install_path).unwrap();
+
+        let configured_paths =
+            successful_shell_script_cleanup(&install_root, &install_path, &install_path);
+
+        assert!(configured_paths.is_empty());
+        assert!(
+            install_path.join("env").exists(),
+            "a relative script that could have been copied from another root must be preserved"
+        );
+    }
+
+    #[test]
+    fn shell_script_cleanup_preserves_legacy_relative_path_for_another_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let install_path = std::fs::canonicalize(parent.path())
+            .unwrap()
+            .join("managed-root");
+        std::fs::create_dir(&install_path).unwrap();
+        let script = managed_shell_script_content("env", Path::new("./other-root")).unwrap();
+        std::fs::write(install_path.join("env"), script).unwrap();
+        let install_root = open_install_root(&install_path).unwrap();
+
+        let configured_paths =
+            successful_shell_script_cleanup(&install_root, &install_path, &install_path);
+
+        assert!(configured_paths.is_empty());
+        assert!(install_path.join("env").exists());
     }
 
     #[test]
@@ -1014,6 +878,72 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(install_path.join("bin")).unwrap(),
             "foreign data"
+        );
+    }
+
+    #[test]
+    fn shell_cleanup_error_preserves_retry_marker_after_cleaning_root_links() {
+        let parent = tempfile::tempdir().unwrap();
+        let install_path = parent.path().join("install");
+        std::fs::create_dir_all(install_path.join("versions")).unwrap();
+        symlink("versions/0.14.1/bin", install_path.join("bin")).unwrap();
+
+        let install_root = open_install_root(&install_path).unwrap();
+        let versions_root = open_cap_dir_nofollow(&install_root, Path::new("versions")).unwrap();
+        let managed_links = vec![ManagedRootLink {
+            name: "bin",
+            version: Version::parse("0.14.1").unwrap(),
+            target: PathBuf::from("versions/0.14.1/bin"),
+        }];
+        let shell_cleanup: Result<()> = Err(std::io::Error::other("simulated read failure").into());
+
+        let error = finish_install_cleanup(
+            shell_cleanup,
+            install_root,
+            versions_root,
+            &install_path,
+            &managed_links,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("simulated read failure"));
+        assert!(
+            install_path.join("versions").is_dir(),
+            "the versions directory must remain so cleanup can be retried"
+        );
+        assert!(
+            std::fs::symlink_metadata(install_path.join("bin")).is_err(),
+            "independent root-link cleanup must finish before reporting the shell error"
+        );
+
+        let install_root = open_install_root(&install_path).unwrap();
+        let versions_root = open_cap_dir_nofollow(&install_root, Path::new("versions")).unwrap();
+        finish_install_cleanup(Ok(()), install_root, versions_root, &install_path, &[]).unwrap();
+
+        assert!(
+            !install_path.exists(),
+            "a successful retry must finish removing the empty install root"
+        );
+    }
+
+    #[test]
+    fn root_link_cleanup_error_preserves_retry_marker() {
+        let parent = tempfile::tempdir().unwrap();
+        let install_path = parent.path().join("install");
+        std::fs::create_dir_all(install_path.join("versions")).unwrap();
+        let install_root = open_install_root(&install_path).unwrap();
+        let versions_root = open_cap_dir_nofollow(&install_root, Path::new("versions")).unwrap();
+        let links_cleanup: Result<()> =
+            Err(std::io::Error::other("simulated root-link failure").into());
+
+        let error =
+            finish_install_cleanup_after_links(Ok(()), links_cleanup, install_root, versions_root)
+                .unwrap_err();
+
+        assert!(error.to_string().contains("simulated root-link failure"));
+        assert!(
+            install_path.join("versions").is_dir(),
+            "the versions directory must remain so root-link cleanup can be retried"
         );
     }
 
@@ -1046,6 +976,44 @@ mod tests {
         assert!(
             !install.path().join("versions/original-0.14.1").exists(),
             "deletion must stay anchored to the verified version directory"
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::{is_local_windows_path, lexical_root_link_target_version};
+    use std::path::Path;
+
+    #[test]
+    fn windows_link_probe_accepts_only_local_drive_paths() {
+        assert!(is_local_windows_path(Path::new(r"C:\WasmEdge\bin")));
+        assert!(is_local_windows_path(Path::new(r"\\?\C:\WasmEdge\bin")));
+        assert!(!is_local_windows_path(Path::new(r"\\server\share\bin")));
+        assert!(!is_local_windows_path(Path::new(
+            r"\\?\UNC\server\share\bin"
+        )));
+        assert!(!is_local_windows_path(Path::new(r"\\.\device\bin")));
+    }
+
+    #[test]
+    fn recognizes_legacy_relative_custom_root_links() {
+        let version = lexical_root_link_target_version(
+            Path::new(r"C:\work\relative-root"),
+            Path::new("relative-root"),
+            "bin",
+            Path::new(r"relative-root\versions\0.14.1\bin"),
+        );
+
+        assert_eq!(version, Some(semver::Version::parse("0.14.1").unwrap()));
+        assert_eq!(
+            lexical_root_link_target_version(
+                Path::new(r"C:\work\relative-root"),
+                Path::new("relative-root"),
+                "bin",
+                Path::new(r"other-root\versions\0.14.1\bin"),
+            ),
+            None
         );
     }
 }

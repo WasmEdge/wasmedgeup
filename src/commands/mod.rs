@@ -8,6 +8,7 @@ pub mod install;
 pub mod list;
 pub mod plugin;
 pub mod remove;
+pub(crate) mod runtime;
 pub mod use_cmd;
 
 fn default_path() -> Result<PathBuf> {
@@ -22,6 +23,16 @@ pub fn resolve_install_path(path: Option<PathBuf>) -> Result<PathBuf> {
         Some(p) => Ok(p),
         None => default_path(),
     }
+}
+
+/// Resolve and lexically normalize the install root used by CLI commands.
+///
+/// Every command that addresses an existing installation must use the same
+/// spelling. Otherwise an install through a path such as
+/// `missing/../wasmedge` is published at the normalized location while later
+/// commands look for the literal, non-existent path.
+pub(crate) fn resolve_normalized_install_path(path: Option<PathBuf>) -> Result<PathBuf> {
+    Ok(normalize_absolute_path(&resolve_install_path(path)?)?)
 }
 
 pub(crate) fn normalize_absolute_path(path: &Path) -> io::Result<PathBuf> {
@@ -107,5 +118,14 @@ mod tests {
             normalize_absolute_path(Path::new("relative-install")).unwrap(),
             normalize_absolute_path(Path::new("./relative-install")).unwrap()
         );
+    }
+
+    #[test]
+    fn normalized_install_path_collapses_missing_parent_segments() {
+        let expected = normalize_absolute_path(Path::new("wasmedge")).unwrap();
+        let resolved =
+            resolve_normalized_install_path(Some(PathBuf::from("missing/../wasmedge"))).unwrap();
+
+        assert_eq!(resolved, expected);
     }
 }

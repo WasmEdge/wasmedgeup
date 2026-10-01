@@ -306,6 +306,32 @@ mod setup_uninstall {
         assert!(rc_after.contains(existing));
         assert!(!rc_after.contains(&expected_source));
     }
+
+    #[test]
+    #[serial]
+    fn test_uninstall_removes_legacy_multiline_source_stanza_only_at_boundaries() {
+        let (_tmp_home, home) = setup_test_environment();
+        let profile = home.join(".profile");
+        let install_dir =
+            std::path::PathBuf::from("/tmp/legacy-install\"\nprintf legacy-injection\n#");
+        let source_line = format!(r#". "{}/env""#, install_dir.display());
+
+        fs::write(
+            &profile,
+            format!("# keep before\n{source_line}\n# keep after\n"),
+        )
+        .unwrap();
+        shell_utils::uninstall_path_configuration(&install_dir).unwrap();
+        assert_eq!(
+            fs::read_to_string(&profile).unwrap(),
+            "# keep before\n# keep after\n"
+        );
+
+        let embedded = format!("# keep before\nprefix{source_line}\n# keep after\n");
+        fs::write(&profile, &embedded).unwrap();
+        shell_utils::uninstall_path_configuration(&install_dir).unwrap();
+        assert_eq!(fs::read_to_string(&profile).unwrap(), embedded);
+    }
 }
 
 #[cfg(all(test, windows))]

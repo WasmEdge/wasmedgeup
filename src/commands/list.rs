@@ -1,9 +1,18 @@
 use crate::{api::ReleasesFilter, cli::CommandContext, prelude::*};
 use clap::Parser;
-use std::path::PathBuf;
-use tokio::fs;
+use semver::Version;
+use std::{
+    ffi::OsStr,
+    path::{Component, Path, PathBuf},
+};
 
-use crate::{cli::CommandExecutor, commands::resolve_install_path};
+use crate::{
+    cli::CommandExecutor,
+    commands::{
+        resolve_normalized_install_path,
+        runtime::{open_install_root, open_versions_root, usable_managed_versions},
+    },
+};
 
 #[derive(Debug, Parser)]
 pub struct ListArgs {
@@ -42,51 +51,53 @@ impl CommandExecutor for ListArgs {
                 }
             }
         } else {
-            let target_dir = resolve_install_path(self.path)?;
-            let versions_dir = target_dir.join("versions");
+            let target_dir = resolve_normalized_install_path(self.path)?;
+            let Some(install_root) = open_install_root(&target_dir)? else {
+                return Ok(());
+            };
+            let Some(versions_root) = open_versions_root(&install_root, &target_dir)? else {
+                return Ok(());
+            };
+            let mut versions = usable_managed_versions(&versions_root)?;
+            versions.sort_by(|a, b| b.cmp(a));
+            let current_version = install_root
+                .read_link_contents("bin")
+                .ok()
+                .and_then(|target| root_link_version(&target_dir, &target))
+                .filter(|current| versions.contains(current));
 
-            let current_version =
-                if let Ok(link_target) = fs::read_link(target_dir.join("bin")).await {
-                    let bin_path = target_dir.join("bin");
-                    let resolved = if link_target.is_absolute() {
-                        link_target
-                    } else {
-                        bin_path.parent().unwrap_or(&target_dir).join(link_target)
-                    };
-                    resolved
-                        .strip_prefix(&versions_dir)
-                        .ok()
-                        .and_then(|p| p.components().next())
-                        .map(|c| c.as_os_str().to_string_lossy().to_string())
+            for version in versions {
+                print!("{version}");
+                if Some(&version) == current_version.as_ref() {
+                    println!(" <- current");
                 } else {
-                    None
-                };
-
-            if let Ok(mut entries) = fs::read_dir(&versions_dir).await {
-                let mut versions = Vec::new();
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    if let Ok(file_type) = entry.file_type().await {
-                        if file_type.is_dir() {
-                            if let Some(version) = entry.file_name().to_str() {
-                                versions.push(version.to_string());
-                            }
-                        }
-                    }
-                }
-
-                versions.sort_by(|a, b| b.cmp(a));
-
-                for version in versions {
-                    print!("{version}");
-                    if Some(version.clone()) == current_version {
-                        println!(" <- current");
-                    } else {
-                        println!();
-                    }
+                    println!();
                 }
             }
         }
 
         Ok(())
     }
+}
+
+fn root_link_version(install_root: &Path, target: &Path) -> Option<Version> {
+    let relative = if target.is_absolute() {
+        target.strip_prefix(install_root).ok()?
+    } else {
+        target
+    };
+    let mut components = relative.components();
+    if !matches!(components.next(), Some(Component::Normal(name)) if name == OsStr::new("versions"))
+    {
+        return None;
+    }
+    let Some(Component::Normal(version)) = components.next() else {
+        return None;
+    };
+    if !matches!(components.next(), Some(Component::Normal(name)) if name == OsStr::new("bin"))
+        || components.next().is_some()
+    {
+        return None;
+    }
+    Version::parse(version.to_str()?).ok()
 }
