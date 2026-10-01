@@ -5,7 +5,9 @@ use wasmedgeup::{
     api::{latest_installed_version, WasmEdgeApiClient},
     cli::{CommandContext, CommandExecutor},
     commands::remove::RemoveArgs,
+    constants::{VERSION_INSTALL_MARKER, VERSION_INSTALL_MARKER_CONTENT},
     error::Error,
+    shell_utils,
 };
 
 mod test_utils;
@@ -239,6 +241,57 @@ async fn test_remove_retargets_each_link_that_points_to_removed_version() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_remove_relative_path_cleans_original_shell_entry() {
+    struct CurrentDirGuard(std::path::PathBuf);
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.0).unwrap();
+        }
+    }
+
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let working_dir = tempfile::tempdir().unwrap();
+    let _current_dir_guard = CurrentDirGuard(std::env::current_dir().unwrap());
+    std::env::set_current_dir(working_dir.path()).unwrap();
+
+    let relative_install = std::path::PathBuf::from("relative-install");
+    let absolute_install = working_dir.path().join(&relative_install);
+    setup_mock_version(&absolute_install.join("versions").join("0.14.1"), "0.14.1").await;
+    shell_utils::setup_path(&relative_install).unwrap();
+
+    let profile = home_dir.join(".profile");
+    let source_line = r#". "relative-install/env""#;
+    assert!(
+        std::fs::read_to_string(&profile)
+            .unwrap()
+            .contains(source_line),
+        "setup must record the caller-provided relative path"
+    );
+
+    RemoveArgs {
+        version: "0.14.1".to_string(),
+        all: false,
+        path: Some(relative_install),
+    }
+    .execute(CommandContext {
+        client: WasmEdgeApiClient::default(),
+        no_progress: true,
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        !std::fs::read_to_string(profile)
+            .unwrap()
+            .contains(source_line),
+        "remove must clean the same relative path spelling written by install"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_remove_all_versions() {
@@ -282,6 +335,14 @@ async fn test_remove_all_preserves_foreign_files_in_custom_root() {
         .await
         .unwrap();
     #[cfg(unix)]
+    let foreign_script = {
+        let path = test_home.join("env.fish");
+        tokio::fs::write(&path, "foreign shell configuration")
+            .await
+            .unwrap();
+        path
+    };
+    #[cfg(unix)]
     let foreign_link = {
         let path = test_home.join("lib");
         std::os::unix::fs::symlink(&foreign_file, &path).unwrap();
@@ -304,6 +365,12 @@ async fn test_remove_all_preserves_foreign_files_in_custom_root() {
         "remove --all must preserve files it does not manage"
     );
     #[cfg(unix)]
+    assert_eq!(
+        tokio::fs::read_to_string(foreign_script).await.unwrap(),
+        "foreign shell configuration",
+        "remove --all must preserve unowned env scripts"
+    );
+    #[cfg(unix)]
     assert!(
         std::fs::symlink_metadata(&foreign_link).is_ok(),
         "remove --all must preserve symlinks it does not manage"
@@ -311,6 +378,41 @@ async fn test_remove_all_preserves_foreign_files_in_custom_root() {
     assert!(
         !test_home.join("versions").exists(),
         "remove --all should still remove installed versions"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remove_all_removes_marker_owned_partial_install() {
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
+    let partial_version = test_home.join("versions").join("0.14.1");
+    tokio::fs::create_dir_all(&partial_version).await.unwrap();
+    tokio::fs::write(
+        partial_version.join(VERSION_INSTALL_MARKER),
+        VERSION_INSTALL_MARKER_CONTENT,
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(partial_version.join("partial-download"), "incomplete")
+        .await
+        .unwrap();
+
+    RemoveArgs {
+        version: String::new(),
+        all: true,
+        path: Some(test_home),
+    }
+    .execute(CommandContext {
+        client: WasmEdgeApiClient::default(),
+        no_progress: true,
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        !partial_version.exists(),
+        "an installer-owned partial version must be removable"
     );
 }
 

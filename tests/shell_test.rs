@@ -129,15 +129,18 @@ mod setup_uninstall {
     fn test_uninstall_removes_scripts_for_unavailable_shells() {
         let (_tmp_home, _home) = setup_test_environment();
         let install_dir = tempfile::tempdir().unwrap();
+        let fake_bin = tempfile::tempdir().unwrap();
         let old_path = std::env::var_os("PATH");
         let old_shell = std::env::var_os("SHELL");
 
-        for script in ["env", "env.fish", "env.nu"] {
-            fs::write(install_dir.path().join(script), "managed script").unwrap();
+        for shell in ["fish", "nu"] {
+            fs::write(fake_bin.path().join(shell), "available for test").unwrap();
         }
+        std::env::set_var("PATH", fake_bin.path());
+        std::env::set_var("SHELL", "/bin/sh");
+        shell_utils::setup_path(install_dir.path()).unwrap();
 
         std::env::set_var("PATH", "");
-        std::env::set_var("SHELL", "/bin/sh");
         shell_utils::uninstall_path(install_dir.path()).unwrap();
 
         match old_path {
@@ -153,6 +156,26 @@ mod setup_uninstall {
             assert!(
                 !install_dir.path().join(script).exists(),
                 "uninstall must remove the managed {script} file even when its shell is unavailable"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_uninstall_preserves_unowned_scripts() {
+        let (_tmp_home, _home) = setup_test_environment();
+        let install_dir = tempfile::tempdir().unwrap();
+
+        for script in ["env", "env.fish", "env.nu"] {
+            fs::write(install_dir.path().join(script), "foreign script").unwrap();
+        }
+
+        shell_utils::uninstall_path(install_dir.path()).unwrap();
+
+        for script in ["env", "env.fish", "env.nu"] {
+            assert_eq!(
+                fs::read_to_string(install_dir.path().join(script)).unwrap(),
+                "foreign script"
             );
         }
     }

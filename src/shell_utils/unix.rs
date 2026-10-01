@@ -62,6 +62,36 @@ pub fn setup_path(install_dir: &Path) -> Result<()> {
 }
 
 pub fn uninstall_path(install_dir: &Path) -> Result<()> {
+    uninstall_path_configuration(install_dir)?;
+
+    for shell in get_supported_shells() {
+        let script = shell.env_script();
+        let path = install_dir.join(script.name);
+        let expected = managed_shell_script_content(script.name, install_dir);
+        let owned = std::fs::symlink_metadata(&path)
+            .ok()
+            .filter(|metadata| {
+                metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && expected
+                        .as_ref()
+                        .is_some_and(|content| metadata.len() == content.len() as u64)
+            })
+            .and_then(|_| read_to_string(&path).ok())
+            .is_some_and(|content| expected.as_deref() == Some(content.as_str()));
+        if owned {
+            if let Err(e) = remove_file(&path) {
+                tracing::debug!(error = %e, path = %path.display(), "Failed to remove env script");
+            }
+        } else if path.exists() {
+            tracing::debug!(path = %path.display(), "Preserving unowned env script");
+        }
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_path_configuration(install_dir: &Path) -> Result<()> {
     for shell in get_supported_shells() {
         let source_line = shell.source_line(install_dir);
         for rc in shell.effective_rc_files() {
@@ -97,16 +127,6 @@ pub fn uninstall_path(install_dir: &Path) -> Result<()> {
         }
     }
 
-    for shell in get_supported_shells() {
-        let script = shell.env_script();
-        let path = install_dir.join(script.name);
-        if path.exists() {
-            if let Err(e) = remove_file(&path) {
-                tracing::debug!(error = %e, path = %path.display(), "Failed to remove env script");
-            }
-        }
-    }
-
     Ok(())
 }
 
@@ -133,6 +153,26 @@ pub struct ShellScript {
     pub name: &'static str,
 }
 
+impl ShellScript {
+    fn content(self, install_dir: &Path) -> String {
+        let wasmedge_bin = format!("{}/bin", install_dir.to_string_lossy());
+        let wasmedge_lib = format!("{}/{}", install_dir.to_string_lossy(), LIB_DIR);
+        let wasmedge_plugin = format!("{}/plugin", install_dir.to_string_lossy());
+
+        self.template
+            .replace("{WASMEDGE_BIN_DIR}", &wasmedge_bin)
+            .replace("{WASMEDGE_LIB_DIR}", &wasmedge_lib)
+            .replace("{WASMEDGE_PLUGIN_DIR}", &wasmedge_plugin)
+    }
+}
+
+pub(crate) fn managed_shell_script_content(name: &str, install_dir: &Path) -> Option<String> {
+    get_supported_shells().into_iter().find_map(|shell| {
+        let script = shell.env_script();
+        (script.name == name).then(|| script.content(install_dir))
+    })
+}
+
 pub trait UnixShell: Send + Sync {
     fn is_present(&self) -> bool;
 
@@ -151,15 +191,8 @@ pub trait UnixShell: Send + Sync {
     }
 
     fn write_script(&self, script: &ShellScript, install_dir: &Path) -> Result<()> {
-        let wasmedge_bin = format!("{}/bin", install_dir.to_string_lossy());
-        let wasmedge_lib = format!("{}/{}", install_dir.to_string_lossy(), LIB_DIR);
-        let wasmedge_plugin = format!("{}/plugin", install_dir.to_string_lossy());
         let env_path = install_dir.join(script.name);
-        let env_content = script
-            .template
-            .replace("{WASMEDGE_BIN_DIR}", &wasmedge_bin)
-            .replace("{WASMEDGE_LIB_DIR}", &wasmedge_lib)
-            .replace("{WASMEDGE_PLUGIN_DIR}", &wasmedge_plugin);
+        let env_content = script.content(install_dir);
 
         let mut file = std::fs::OpenOptions::new()
             .write(true)

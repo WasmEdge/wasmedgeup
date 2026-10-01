@@ -1,4 +1,8 @@
-use std::path::PathBuf;
+use std::{
+    fs::OpenOptions,
+    io::{ErrorKind, Read, Write},
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
 use tokio::fs;
@@ -7,6 +11,7 @@ use crate::{
     api::{Asset, WasmEdgeApiClient},
     cli::{CommandContext, CommandExecutor},
     commands::resolve_install_path,
+    constants::{VERSION_INSTALL_MARKER, VERSION_INSTALL_MARKER_CONTENT},
     prelude::*,
     shell_utils,
     target::{TargetArch, TargetOS},
@@ -171,10 +176,12 @@ impl CommandExecutor for InstallArgs {
             }
         }
 
-        let version_dir = target_dir.join("versions").join(version.to_string());
-        fs::create_dir_all(&version_dir).await.inspect_err(
-            |e| tracing::error!(error = %e.to_string(), "Failed to create version directory"),
+        let versions_dir = target_dir.join("versions");
+        fs::create_dir_all(&versions_dir).await.inspect_err(
+            |e| tracing::error!(error = %e.to_string(), "Failed to create versions directory"),
         )?;
+        let version_dir = versions_dir.join(version.to_string());
+        claim_version_directory(&version_dir)?;
         tracing::debug!(version_dir = %version_dir.display(), "Created version directory");
 
         let mut read_dir = fs::read_dir(&tmpdir).await?;
@@ -218,5 +225,132 @@ impl CommandExecutor for InstallArgs {
         );
 
         Ok(())
+    }
+}
+
+fn claim_version_directory(version_dir: &Path) -> Result<()> {
+    let created = match std::fs::create_dir(version_dir) {
+        Ok(()) => true,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => false,
+        Err(error) => return Err(error.into()),
+    };
+
+    if !created {
+        let metadata = std::fs::symlink_metadata(version_dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(Error::InvalidPath {
+                path: version_dir.display().to_string(),
+                reason: "the version path must be a real directory, not a symlink or file"
+                    .to_string(),
+            });
+        }
+
+        let marker_is_valid = valid_version_marker(version_dir);
+        let has_runtime = ["bin/wasmedge", "bin/wasmedge.exe"]
+            .into_iter()
+            .any(|binary| {
+                std::fs::symlink_metadata(version_dir.join(binary))
+                    .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+            });
+        if !marker_is_valid && !has_runtime {
+            return Err(Error::InvalidPath {
+                path: version_dir.display().to_string(),
+                reason: "refusing to claim an existing directory that is not owned by wasmedgeup"
+                    .to_string(),
+            });
+        }
+    }
+
+    write_version_marker(version_dir)
+}
+
+fn valid_version_marker(version_dir: &Path) -> bool {
+    let marker = version_dir.join(VERSION_INSTALL_MARKER);
+    let Some(metadata) = std::fs::symlink_metadata(&marker).ok() else {
+        return false;
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() != VERSION_INSTALL_MARKER_CONTENT.len() as u64
+    {
+        return false;
+    }
+
+    let mut content = Vec::with_capacity(VERSION_INSTALL_MARKER_CONTENT.len() + 1);
+    std::fs::File::open(marker)
+        .and_then(|file| {
+            file.take(VERSION_INSTALL_MARKER_CONTENT.len() as u64 + 1)
+                .read_to_end(&mut content)
+        })
+        .is_ok_and(|_| content == VERSION_INSTALL_MARKER_CONTENT.as_bytes())
+}
+
+fn write_version_marker(version_dir: &Path) -> Result<()> {
+    let marker = version_dir.join(VERSION_INSTALL_MARKER);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(mut file) => {
+            file.write_all(VERSION_INSTALL_MARKER_CONTENT.as_bytes())?;
+            file.sync_data()?;
+            Ok(())
+        }
+        Err(error)
+            if error.kind() == ErrorKind::AlreadyExists && valid_version_marker(version_dir) =>
+        {
+            Ok(())
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Err(Error::InvalidPath {
+            path: marker.display().to_string(),
+            reason: "the wasmedgeup ownership marker is not a regular marker file".to_string(),
+        }),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claim_marks_a_new_version_before_copying() {
+        let parent = tempfile::tempdir().unwrap();
+        let version_dir = parent.path().join("0.14.1");
+
+        claim_version_directory(&version_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(version_dir.join(VERSION_INSTALL_MARKER)).unwrap(),
+            VERSION_INSTALL_MARKER_CONTENT
+        );
+    }
+
+    #[test]
+    fn claim_migrates_a_legacy_runtime_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let version_dir = parent.path().join("0.14.1");
+        std::fs::create_dir_all(version_dir.join("bin")).unwrap();
+        std::fs::write(version_dir.join("bin/wasmedge"), "runtime").unwrap();
+
+        claim_version_directory(&version_dir).unwrap();
+
+        assert!(valid_version_marker(&version_dir));
+    }
+
+    #[test]
+    fn claim_preserves_an_existing_unowned_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let version_dir = parent.path().join("0.14.1");
+        std::fs::create_dir(&version_dir).unwrap();
+        std::fs::write(version_dir.join("foreign-data"), "preserve").unwrap();
+
+        assert!(claim_version_directory(&version_dir).is_err());
+        assert_eq!(
+            std::fs::read_to_string(version_dir.join("foreign-data")).unwrap(),
+            "preserve"
+        );
+        assert!(!version_dir.join(VERSION_INSTALL_MARKER).exists());
     }
 }

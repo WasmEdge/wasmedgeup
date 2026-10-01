@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 pub fn setup_test_environment() -> (tempfile::TempDir, PathBuf) {
     let test_home = tempfile::tempdir().unwrap();
-    let test_home_path = test_home.path().to_path_buf();
+    let test_home_path = std::fs::canonicalize(test_home.path()).unwrap();
 
     // Set up environment variables based on platform
     #[cfg(windows)]

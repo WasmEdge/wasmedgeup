@@ -33,9 +33,11 @@ which = "8"
 raw-cpuid = "11"
 cap-std = "4.0.3"
 cap-primitives = "4.0.3"
+cap-tempfile = "4.0.3"
 
 [target.'cfg(unix)'.dependencies]
 flate2 = "1.1.9"
+rustix = { version = "1.1.4", features = ["fs"] }
 tar = "0.4.46"
 
 [target.'cfg(windows)'.dependencies]
@@ -43,6 +45,8 @@ zip = "8.6.0"
 winreg = "0.56"
 nvml-wrapper = "0.13.0"
 wmi = "0.18.4"
+same-file = "1.0.6"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(windows)'.dependencies.opencl3]
 version = "0.12"

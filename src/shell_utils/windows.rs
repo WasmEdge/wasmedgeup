@@ -41,6 +41,10 @@ pub fn setup_path(install_dir: &Path) -> Result<()> {
 }
 
 pub fn uninstall_path(install_dir: &Path) -> Result<()> {
+    uninstall_path_configuration(install_dir)
+}
+
+pub fn uninstall_path_configuration(install_dir: &Path) -> Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let env = hkcu
         .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
