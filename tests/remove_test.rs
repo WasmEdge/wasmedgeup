@@ -13,7 +13,8 @@ mod test_utils;
 #[tokio::test]
 #[serial]
 async fn test_remove_single_version() {
-    let (_tempdir, test_home) = test_utils::setup_test_environment();
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
 
     let version = "0.14.1";
     let version_dir = test_home.join("versions").join(version);
@@ -36,7 +37,8 @@ async fn test_remove_single_version() {
 #[tokio::test]
 #[serial]
 async fn test_remove_multiple_versions() {
-    let (_tempdir, test_home) = test_utils::setup_test_environment();
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
 
     let ordered_versions = ["0.20.0", "0.14.1", "0.14.1-rc.1", "0.9.0"];
     for version in &ordered_versions {
@@ -92,7 +94,8 @@ async fn test_remove_multiple_versions() {
 #[tokio::test]
 #[serial]
 async fn test_remove_all_versions() {
-    let (_tempdir, test_home) = test_utils::setup_test_environment();
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
 
     let versions = ["0.14.1", "0.15.0"];
     for version in &versions {
@@ -120,8 +123,136 @@ async fn test_remove_all_versions() {
 
 #[tokio::test]
 #[serial]
+async fn test_remove_all_preserves_foreign_files_in_custom_root() {
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join("custom-install-root");
+
+    let version_dir = test_home.join("versions").join("0.14.1");
+    setup_mock_version(&version_dir, "0.14.1").await;
+    let foreign_file = test_home.join("do-not-delete");
+    tokio::fs::write(&foreign_file, "unrelated data")
+        .await
+        .unwrap();
+    #[cfg(unix)]
+    let foreign_link = {
+        let path = test_home.join("lib");
+        std::os::unix::fs::symlink(&foreign_file, &path).unwrap();
+        path
+    };
+
+    let remove_args = RemoveArgs {
+        version: String::new(),
+        all: true,
+        path: Some(test_home.clone()),
+    };
+    let ctx = CommandContext {
+        client: WasmEdgeApiClient::default(),
+        no_progress: true,
+    };
+    remove_args.execute(ctx).await.unwrap();
+
+    assert!(
+        foreign_file.exists(),
+        "remove --all must preserve files it does not manage"
+    );
+    #[cfg(unix)]
+    assert!(
+        std::fs::symlink_metadata(&foreign_link).is_ok(),
+        "remove --all must preserve symlinks it does not manage"
+    );
+    assert!(
+        !test_home.join("versions").exists(),
+        "remove --all should still remove installed versions"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remove_all_preserves_unmanaged_versions_entries() {
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
+
+    let version_dir = test_home.join("versions").join("0.14.1");
+    setup_mock_version(&version_dir, "0.14.1").await;
+    let foreign_file = test_home
+        .join("versions")
+        .join("backups")
+        .join("do-not-delete");
+    tokio::fs::create_dir_all(foreign_file.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&foreign_file, "unrelated data")
+        .await
+        .unwrap();
+
+    let remove_args = RemoveArgs {
+        version: String::new(),
+        all: true,
+        path: Some(test_home.clone()),
+    };
+    let ctx = CommandContext {
+        client: WasmEdgeApiClient::default(),
+        no_progress: true,
+    };
+    remove_args.execute(ctx).await.unwrap();
+
+    assert!(
+        foreign_file.exists(),
+        "remove --all must preserve non-version entries under versions"
+    );
+    assert!(
+        !version_dir.exists(),
+        "remove --all should remove semantic-version installation directories"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_remove_rejects_symlinked_versions_directory() {
+    use std::os::unix::fs::symlink;
+
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
+    tokio::fs::create_dir_all(&test_home).await.unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_version = outside.path().join("0.14.1");
+    tokio::fs::create_dir_all(&outside_version).await.unwrap();
+    let sentinel = outside_version.join("do-not-delete");
+    tokio::fs::write(&sentinel, "outside install root")
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(outside.path().join("0.15.0"))
+        .await
+        .unwrap();
+    symlink(outside.path(), test_home.join("versions")).unwrap();
+
+    let remove_args = RemoveArgs {
+        version: "0.14.1".to_string(),
+        all: false,
+        path: Some(test_home),
+    };
+    let ctx = CommandContext {
+        client: WasmEdgeApiClient::default(),
+        no_progress: true,
+    };
+    let result = remove_args.execute(ctx).await;
+
+    assert!(
+        matches!(result, Err(Error::InvalidPath { .. })),
+        "expected InvalidPath for a symlinked versions directory, got: {result:?}"
+    );
+    assert!(
+        sentinel.exists(),
+        "a version outside the install root must not be deleted"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_remove_nonexistent_version() {
-    let (_tempdir, test_home) = test_utils::setup_test_environment();
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
 
     let remove_args = RemoveArgs {
         version: "0.99.99".to_string(),
