@@ -31,8 +31,7 @@ impl CommandExecutor for ListArgs {
                 ReleasesFilter::Stable
             };
 
-            let releases = ctx.client.releases(filter, 10).await?;
-            let latest_release = ctx.client.latest_release().await?;
+            let (releases, latest_release) = ctx.client.releases_with_latest(filter, 10).await?;
 
             for gh_release in releases.into_iter() {
                 print!("{gh_release}");
