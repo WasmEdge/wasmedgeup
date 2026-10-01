@@ -1,12 +1,11 @@
 use std::{
-    io::ErrorKind,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
 };
 
 use cap_std::{ambient_authority, fs::Dir};
 use clap::Parser;
 use semver::Version;
-use tokio::fs;
 
 use crate::{
     cli::{CommandContext, CommandExecutor},
@@ -37,11 +36,11 @@ pub struct RemoveArgs {
 
 impl CommandExecutor for RemoveArgs {
     async fn execute(self, ctx: CommandContext) -> Result<()> {
-        let target_dir = resolve_install_path(self.path)?;
+        let target_dir = std::path::absolute(resolve_install_path(self.path)?)?;
         let versions_dir = target_dir.join("versions");
 
-        let target_metadata = match fs::symlink_metadata(&target_dir).await {
-            Ok(metadata) => metadata,
+        let install_root = match open_install_root(&target_dir) {
+            Ok(install_root) => install_root,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 if self.all {
                     return Err(Error::InvalidPath {
@@ -53,21 +52,19 @@ impl CommandExecutor for RemoveArgs {
                     version: self.version,
                 });
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(Error::InvalidPath {
+                    path: target_dir.display().to_string(),
+                    reason: format!(
+                        "the install root must be a real directory opened without following \
+                         symlinks: {error}"
+                    ),
+                });
+            }
         };
 
-        if target_metadata.file_type().is_symlink() || !target_metadata.is_dir() {
-            return Err(Error::InvalidPath {
-                path: target_dir.display().to_string(),
-                reason: "the install root must be a real directory, not a symlink or file"
-                    .to_string(),
-            });
-        }
-
-        let canonical_target_dir = fs::canonicalize(&target_dir).await?;
-        let install_root = Dir::open_ambient_dir(&canonical_target_dir, ambient_authority())?;
-        let versions_metadata = match install_root.symlink_metadata("versions") {
-            Ok(metadata) => metadata,
+        let versions_root = match open_cap_dir_nofollow(&install_root, Path::new("versions")) {
+            Ok(versions_root) => versions_root,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 if self.all {
                     return Err(Error::InvalidPath {
@@ -79,18 +76,16 @@ impl CommandExecutor for RemoveArgs {
                     version: self.version,
                 });
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(Error::InvalidPath {
+                    path: versions_dir.display().to_string(),
+                    reason: format!(
+                        "the versions path must be a real directory opened without following \
+                         symlinks: {error}"
+                    ),
+                });
+            }
         };
-
-        if versions_metadata.file_type().is_symlink() || !versions_metadata.is_dir() {
-            return Err(Error::InvalidPath {
-                path: versions_dir.display().to_string(),
-                reason: "the versions path must be a real directory, not a symlink or file"
-                    .to_string(),
-            });
-        }
-
-        let versions_root = install_root.open_dir("versions")?;
 
         if !self.all && self.version.is_empty() {
             return Err(Error::InvalidPath {
@@ -106,60 +101,16 @@ impl CommandExecutor for RemoveArgs {
             if let Err(e) = uninstall_path(&target_dir) {
                 tracing::warn!(error = %e.to_string(), "Failed to update shell rc files during --all removal");
             }
-            drop(versions_root);
-            remove_cap_dir_if_empty(&install_root, Path::new("versions"))?;
-            cleanup_managed_root_entries(
-                &install_root,
-                &target_dir,
-                &canonical_target_dir,
-                &managed_versions,
-            )?;
-            drop(install_root);
-            remove_path_dir_if_empty(&target_dir).await?;
+            remove_open_dir_if_empty(versions_root)?;
+            cleanup_managed_root_entries(&install_root, &target_dir, &managed_versions)?;
+            remove_open_dir_if_empty(install_root)?;
             tracing::info!("All versions and configuration removed successfully");
             return Ok(());
         }
 
-        let bin_path = target_dir.join("bin");
-        let current_version = if fs::symlink_metadata(&bin_path)
-            .await
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            let bin_link = fs::read_link(&bin_path).await?;
-            tracing::debug!(link = ?bin_link, "Raw symlink path");
-
-            let normalized = if bin_link.is_absolute() {
-                bin_link
-                    .strip_prefix(&target_dir)
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or(bin_link.clone())
-            } else {
-                bin_link.clone()
-            };
-
-            let mut comps = normalized.components().peekable();
-            let mut found: Option<String> = None;
-            while let Some(comp) = comps.next() {
-                if let std::path::Component::Normal(name) = comp {
-                    if name == "versions" {
-                        if let Some(std::path::Component::Normal(ver)) = comps.peek().copied() {
-                            let v = ver.to_string_lossy().to_string();
-                            tracing::debug!(version = %v, "Extracted version from symlink");
-                            found = Some(v);
-                        }
-                        break;
-                    }
-                }
-            }
-
-            if found.is_none() {
-                tracing::debug!(normalized = %normalized.display(), "Could not find versions/<ver> in symlink path");
-            }
-            found
-        } else {
-            tracing::debug!("No bin symlink found");
-            None
-        };
+        let managed_versions_before = managed_versions(&versions_root)?;
+        let current_version = root_link_version(&install_root, &target_dir, "bin")?
+            .filter(|version| managed_versions_before.contains(version));
 
         let version = ctx
             .client
@@ -172,18 +123,20 @@ impl CommandExecutor for RemoveArgs {
 
         let version_name = version.to_string();
         let version_path = versions_dir.join(&version_name);
-        let managed_versions_before = managed_versions(&versions_root)?;
-        match versions_root.symlink_metadata(&version_name) {
+        let removed = match versions_root.symlink_metadata(&version_name) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                if !is_managed_version_dir(&versions_root, Path::new(&version_name))? {
+                let Some(version_dir) =
+                    open_managed_version_dir(&versions_root, Path::new(&version_name))?
+                else {
                     return Err(Error::InvalidPath {
                         path: version_path.display().to_string(),
                         reason: "the version directory does not contain a WasmEdge runtime"
                             .to_string(),
                     });
-                }
-                remove_version_dir(&versions_root, version_name.clone()).await?;
+                };
+                remove_version_dir(version_dir).await?;
                 tracing::info!(version = %version, "Version removed successfully");
+                true
             }
             Ok(_) => {
                 return Err(Error::InvalidPath {
@@ -192,11 +145,11 @@ impl CommandExecutor for RemoveArgs {
                         .to_string(),
                 });
             }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => false,
             Err(error) => return Err(error.into()),
-        }
+        };
 
-        let removed_current = Some(version.to_string()) == current_version;
+        let removed_current = current_version.as_ref() == Some(&version);
         let latest_version = latest_managed_version(&versions_root)?;
 
         if latest_version.is_none() {
@@ -204,33 +157,27 @@ impl CommandExecutor for RemoveArgs {
             if let Err(e) = uninstall_path(&target_dir) {
                 tracing::warn!(error = %e.to_string(), "Failed to update shell rc files when cleaning up last version");
             }
-            drop(versions_root);
-            remove_cap_dir_if_empty(&install_root, Path::new("versions"))?;
-            cleanup_managed_root_entries(
-                &install_root,
-                &target_dir,
-                &canonical_target_dir,
-                &managed_versions_before,
-            )?;
-            drop(install_root);
-            remove_path_dir_if_empty(&target_dir).await?;
+            remove_open_dir_if_empty(versions_root)?;
+            cleanup_managed_root_entries(&install_root, &target_dir, &managed_versions_before)?;
+            remove_open_dir_if_empty(install_root)?;
             tracing::info!("All versions and configuration removed successfully");
             return Ok(());
         }
 
-        if removed_current {
-            tracing::debug!(removed_version = ?current_version, "Current version was removed");
+        if removed {
+            let latest_version = latest_version.expect("checked above");
+            retarget_removed_version_links(
+                &install_root,
+                &target_dir,
+                &version,
+                &latest_version,
+                &managed_versions_before,
+                removed_current,
+            )?;
 
-            if let Some(version) = latest_version {
-                tracing::info!(version = %version, "Switching to latest version");
-                retarget_managed_root_links(
-                    &install_root,
-                    &target_dir,
-                    &canonical_target_dir,
-                    &version.to_string(),
-                    &managed_versions_before,
-                )?;
-                println!("Switched to WasmEdge runtime version: {version}");
+            if removed_current {
+                tracing::info!(version = %latest_version, "Switching to latest version");
+                println!("Switched to WasmEdge runtime version: {latest_version}");
             }
         }
 
@@ -238,9 +185,37 @@ impl CommandExecutor for RemoveArgs {
     }
 }
 
+fn open_install_root(path: &Path) -> io::Result<Dir> {
+    let parent_path = path.parent().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            "the install root must have a parent directory",
+        )
+    })?;
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            "the install root must not be a filesystem root",
+        )
+    })?;
+    let parent = Dir::open_ambient_dir(parent_path, ambient_authority())?;
+    open_cap_dir_nofollow(&parent, Path::new(name))
+}
+
+fn open_cap_dir_nofollow(parent: &Dir, path: &Path) -> io::Result<Dir> {
+    let parent_file = parent.try_clone()?.into_std_file();
+    let dir = cap_primitives::fs::open_dir_nofollow(&parent_file, path)?;
+    Ok(Dir::from_std_file(dir))
+}
+
 async fn remove_all_versions(versions_dir: &Dir, managed_versions: &[Version]) -> Result<()> {
     for version in managed_versions {
-        remove_version_dir(versions_dir, version.to_string()).await?;
+        let name = version.to_string();
+        if let Some(version_dir) = open_managed_version_dir(versions_dir, Path::new(&name))? {
+            remove_version_dir(version_dir).await?;
+        } else {
+            tracing::debug!(%version, "Preserving version entry that is no longer managed");
+        }
     }
     Ok(())
 }
@@ -257,7 +232,9 @@ fn managed_versions(versions_dir: &Dir) -> Result<Vec<Version>> {
             continue;
         };
 
-        if entry.file_type()?.is_dir() && is_managed_version_dir(versions_dir, Path::new(&name))? {
+        if entry.file_type()?.is_dir()
+            && open_managed_version_dir(versions_dir, Path::new(&name))?.is_some()
+        {
             versions.push(version);
         } else {
             tracing::debug!(version = %name, "Preserving unowned semantic-version entry");
@@ -271,21 +248,21 @@ fn latest_managed_version(versions_dir: &Dir) -> Result<Option<Version>> {
     Ok(managed_versions(versions_dir)?.into_iter().max())
 }
 
-fn is_managed_version_dir(versions_dir: &Dir, name: &Path) -> Result<bool> {
+fn open_managed_version_dir(versions_dir: &Dir, name: &Path) -> Result<Option<Dir>> {
     let metadata = match versions_dir.symlink_metadata(name) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Ok(false);
+        return Ok(None);
     }
 
-    let version_dir = versions_dir.open_dir(name)?;
+    let version_dir = open_cap_dir_nofollow(versions_dir, name)?;
     for binary in ["bin/wasmedge", "bin/wasmedge.exe"] {
         match version_dir.symlink_metadata(binary) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                return Ok(true);
+                return Ok(Some(version_dir));
             }
             Ok(_) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -293,39 +270,35 @@ fn is_managed_version_dir(versions_dir: &Dir, name: &Path) -> Result<bool> {
         }
     }
 
-    Ok(false)
+    Ok(None)
 }
 
-async fn remove_version_dir(versions_dir: &Dir, name: String) -> Result<()> {
-    let versions_dir = versions_dir.try_clone()?;
-    tokio::task::spawn_blocking(move || versions_dir.remove_dir_all(name))
+async fn remove_version_dir(version_dir: Dir) -> Result<()> {
+    tokio::task::spawn_blocking(move || version_dir.remove_open_dir_all())
         .await
         .map_err(join_err_to_io_error)??;
     Ok(())
 }
 
-fn retarget_managed_root_links(
+fn retarget_removed_version_links(
     install_root: &Dir,
     target_dir: &Path,
-    canonical_target_dir: &Path,
-    version: &str,
+    removed_version: &Version,
+    replacement_version: &Version,
     managed_versions: &[Version],
+    create_missing: bool,
 ) -> Result<()> {
     for name in MANAGED_ROOT_LINKS {
         let display_path = target_dir.join(name);
         let replace = match install_root.symlink_metadata(name) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 let link_target = install_root.read_link_contents(name)?;
-                is_managed_root_link(
-                    target_dir,
-                    canonical_target_dir,
-                    name,
-                    &link_target,
-                    managed_versions,
-                )
+                root_link_target_version(target_dir, name, &link_target).is_some_and(|version| {
+                    version == *removed_version && managed_versions.contains(&version)
+                })
             }
             Ok(_) => false,
-            Err(error) if error.kind() == ErrorKind::NotFound => true,
+            Err(error) if error.kind() == ErrorKind::NotFound => create_missing,
             Err(error) => return Err(error.into()),
         };
 
@@ -337,7 +310,12 @@ fn retarget_managed_root_links(
         if install_root.symlink_metadata(name).is_ok() {
             remove_symlink(install_root, name)?;
         }
-        create_managed_root_link(install_root, target_dir, version, name)?;
+        create_managed_root_link(
+            install_root,
+            target_dir,
+            &replacement_version.to_string(),
+            name,
+        )?;
     }
 
     Ok(())
@@ -346,7 +324,6 @@ fn retarget_managed_root_links(
 fn cleanup_managed_root_entries(
     install_root: &Dir,
     target_dir: &Path,
-    canonical_target_dir: &Path,
     managed_versions: &[Version],
 ) -> Result<()> {
     for name in MANAGED_ROOT_LINKS {
@@ -354,13 +331,9 @@ fn cleanup_managed_root_entries(
         match install_root.symlink_metadata(name) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 let link_target = install_root.read_link_contents(name)?;
-                if is_managed_root_link(
-                    target_dir,
-                    canonical_target_dir,
-                    name,
-                    &link_target,
-                    managed_versions,
-                ) {
+                let managed = root_link_target_version(target_dir, name, &link_target)
+                    .is_some_and(|version| managed_versions.contains(&version));
+                if managed {
                     remove_symlink(install_root, name)?;
                 } else {
                     tracing::debug!(path = %path.display(), "Preserving unmanaged install-root symlink");
@@ -376,21 +349,21 @@ fn cleanup_managed_root_entries(
     Ok(())
 }
 
-fn is_managed_root_link(
-    target_dir: &Path,
-    canonical_target_dir: &Path,
-    name: &str,
-    link_target: &Path,
-    managed_versions: &[Version],
-) -> bool {
-    let relative_target = if link_target.is_absolute() {
-        match link_target
-            .strip_prefix(target_dir)
-            .or_else(|_| link_target.strip_prefix(canonical_target_dir))
-        {
-            Ok(path) => path,
-            Err(_) => return false,
+fn root_link_version(install_root: &Dir, target_dir: &Path, name: &str) -> Result<Option<Version>> {
+    match install_root.symlink_metadata(name) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let link_target = install_root.read_link_contents(name)?;
+            Ok(root_link_target_version(target_dir, name, &link_target))
         }
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn root_link_target_version(target_dir: &Path, name: &str, link_target: &Path) -> Option<Version> {
+    let relative_target = if link_target.is_absolute() {
+        link_target.strip_prefix(target_dir).ok()?
     } else {
         link_target
     };
@@ -408,38 +381,20 @@ fn is_managed_root_link(
         components.next(),
     )
     else {
-        return false;
+        return None;
     };
 
-    let Some(version) = version
+    if versions != std::ffi::OsStr::new("versions") || link_name != std::ffi::OsStr::new(name) {
+        return None;
+    }
+
+    version
         .to_str()
         .and_then(|value| Version::parse(value).ok())
-    else {
-        return false;
-    };
-
-    versions == std::ffi::OsStr::new("versions")
-        && link_name == std::ffi::OsStr::new(name)
-        && managed_versions.contains(&version)
 }
 
-fn remove_cap_dir_if_empty(parent: &Dir, path: &Path) -> Result<bool> {
-    match parent.remove_dir(path) {
-        Ok(()) => Ok(true),
-        Err(error)
-            if matches!(
-                error.kind(),
-                ErrorKind::DirectoryNotEmpty | ErrorKind::NotFound
-            ) =>
-        {
-            Ok(false)
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-async fn remove_path_dir_if_empty(path: &Path) -> Result<bool> {
-    match fs::remove_dir(path).await {
+fn remove_open_dir_if_empty(dir: Dir) -> Result<bool> {
+    match dir.remove_open_dir() {
         Ok(()) => Ok(true),
         Err(error)
             if matches!(
@@ -482,11 +437,11 @@ fn create_managed_root_link(
 #[cfg(windows)]
 fn create_managed_root_link(
     install_root: &Dir,
-    target_dir: &Path,
+    _target_dir: &Path,
     version: &str,
     name: &str,
 ) -> Result<()> {
-    let target = target_dir.join("versions").join(version).join(name);
+    let target = Path::new("versions").join(version).join(name);
     install_root.symlink_dir(target, name)?;
     Ok(())
 }
@@ -496,8 +451,21 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
+    #[test]
+    fn install_root_open_does_not_follow_symlinks() {
+        let parent = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let install_link = parent.path().join("install");
+        symlink(outside.path(), &install_link).unwrap();
+
+        assert!(
+            open_install_root(&install_link).is_err(),
+            "opening the install root must reject a symlink"
+        );
+    }
+
     #[tokio::test]
-    async fn pinned_versions_handle_does_not_follow_replaced_parent() {
+    async fn pinned_version_handle_does_not_follow_replaced_entry() {
         let install = tempfile::tempdir().unwrap();
         let original_version = install.path().join("versions/0.14.1");
         std::fs::create_dir_all(&original_version).unwrap();
@@ -511,21 +479,20 @@ mod tests {
 
         let install_root = Dir::open_ambient_dir(install.path(), ambient_authority()).unwrap();
         let versions_root = install_root.open_dir("versions").unwrap();
+        let version_dir = open_cap_dir_nofollow(&versions_root, Path::new("0.14.1")).unwrap();
         std::fs::rename(
-            install.path().join("versions"),
-            install.path().join("original-versions"),
+            install.path().join("versions/0.14.1"),
+            install.path().join("versions/original-0.14.1"),
         )
         .unwrap();
-        symlink(outside.path(), install.path().join("versions")).unwrap();
+        symlink(&outside_version, install.path().join("versions/0.14.1")).unwrap();
 
-        remove_version_dir(&versions_root, "0.14.1".to_string())
-            .await
-            .unwrap();
+        remove_version_dir(version_dir).await.unwrap();
 
         assert!(sentinel.exists(), "replacement symlink target must remain");
         assert!(
-            !install.path().join("original-versions/0.14.1").exists(),
-            "deletion must stay anchored to the opened versions directory"
+            !install.path().join("versions/original-0.14.1").exists(),
+            "deletion must stay anchored to the verified version directory"
         );
     }
 }

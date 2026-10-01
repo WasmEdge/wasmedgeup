@@ -195,6 +195,50 @@ async fn test_remove_current_preserves_unmanaged_links_when_switching() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_remove_retargets_each_link_that_points_to_removed_version() {
+    use std::os::unix::fs::symlink;
+
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
+    setup_mock_version(&test_home.join("versions").join("0.15.0"), "0.15.0").await;
+    setup_mock_version(&test_home.join("versions").join("0.14.1"), "0.14.1").await;
+
+    let include_link = test_home.join("include");
+    symlink("versions/0.14.1/include", &include_link).unwrap();
+
+    RemoveArgs {
+        version: "0.14.1".to_string(),
+        all: false,
+        path: Some(test_home.clone()),
+    }
+    .execute(CommandContext {
+        client: WasmEdgeApiClient::default(),
+        no_progress: true,
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_link(test_home.join("bin")).unwrap(),
+        Path::new("versions/0.15.0/bin"),
+        "a link to another managed version must remain unchanged"
+    );
+    assert_eq!(
+        std::fs::read_link(include_link).unwrap(),
+        Path::new("versions/0.15.0/include"),
+        "each managed link to the removed version must be retargeted"
+    );
+    for name in ["lib", "plugin"] {
+        assert!(
+            std::fs::symlink_metadata(test_home.join(name)).is_err(),
+            "missing links must stay missing when bin did not switch"
+        );
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn test_remove_all_versions() {

@@ -3732,6 +3732,7 @@ dependencies = [
 name = "wasmedgeup"
 version = "0.2.3"
 dependencies = [
+ "cap-primitives",
  "cap-std",
  "cfg-if",
  "clap",
