@@ -93,6 +93,110 @@ async fn test_remove_multiple_versions() {
 
 #[tokio::test]
 #[serial]
+async fn test_remove_last_version_ignores_unmanaged_versions_directories() {
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
+    let versions_dir = test_home.join("versions");
+
+    let version_dir = versions_dir.join("0.14.1");
+    setup_mock_version(&version_dir, "0.14.1").await;
+    let foreign_file = versions_dir.join("backups").join("do-not-delete");
+    tokio::fs::create_dir_all(foreign_file.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&foreign_file, "unrelated data")
+        .await
+        .unwrap();
+    let foreign_semver_file = versions_dir.join("9.9.9").join("do-not-delete");
+    tokio::fs::create_dir_all(foreign_semver_file.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&foreign_semver_file, "unrelated semantic-version data")
+        .await
+        .unwrap();
+    #[cfg(unix)]
+    let foreign_semver_link = {
+        use std::os::unix::fs::symlink;
+
+        let path = test_home.join("include");
+        symlink(Path::new("versions/9.9.9/include"), &path).unwrap();
+        path
+    };
+
+    let remove_args = RemoveArgs {
+        version: "0.14.1".to_string(),
+        all: false,
+        path: Some(test_home.clone()),
+    };
+    remove_args
+        .execute(CommandContext {
+            client: WasmEdgeApiClient::default(),
+            no_progress: true,
+        })
+        .await
+        .unwrap();
+
+    assert!(foreign_file.exists(), "unmanaged versions data must remain");
+    assert!(
+        foreign_semver_file.exists(),
+        "an unowned semantic-version directory must not count as an installed runtime"
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::read_link(foreign_semver_link).unwrap(),
+        Path::new("versions/9.9.9/include"),
+        "a root symlink into an unowned semver directory must remain"
+    );
+    assert!(
+        std::fs::symlink_metadata(test_home.join("bin")).is_err(),
+        "managed root links must be removed when no installed versions remain"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_remove_current_preserves_unmanaged_links_when_switching() {
+    use std::os::unix::fs::symlink;
+
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join(".wasmedge");
+    setup_mock_version(&test_home.join("versions").join("0.14.1"), "0.14.1").await;
+    setup_mock_version(&test_home.join("versions").join("0.15.0"), "0.15.0").await;
+
+    let foreign_target = tempfile::tempdir().unwrap();
+    let foreign_link = test_home.join("lib");
+    symlink(foreign_target.path(), &foreign_link).unwrap();
+
+    let remove_args = RemoveArgs {
+        version: "0.14.1".to_string(),
+        all: false,
+        path: Some(test_home.clone()),
+    };
+    remove_args
+        .execute(CommandContext {
+            client: WasmEdgeApiClient::default(),
+            no_progress: true,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_link(&foreign_link).unwrap(),
+        foreign_target.path(),
+        "switching versions must preserve unrelated root symlinks"
+    );
+    for name in ["bin", "include"] {
+        assert_eq!(
+            std::fs::read_link(test_home.join(name)).unwrap(),
+            Path::new("versions").join("0.15.0").join(name),
+            "managed or missing links must point to the remaining version"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
 async fn test_remove_all_versions() {
     let (_tempdir, home_dir) = test_utils::setup_test_environment();
     let test_home = home_dir.join(".wasmedge");
@@ -203,6 +307,46 @@ async fn test_remove_all_preserves_unmanaged_versions_entries() {
     assert!(
         !version_dir.exists(),
         "remove --all should remove semantic-version installation directories"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remove_all_preserves_unowned_semver_directories() {
+    let (_tempdir, home_dir) = test_utils::setup_test_environment();
+    let test_home = home_dir.join("custom-install-root");
+    let versions_dir = test_home.join("versions");
+
+    let managed_version = versions_dir.join("0.14.1");
+    setup_mock_version(&managed_version, "0.14.1").await;
+
+    let foreign_file = versions_dir.join("9.9.9").join("do-not-delete");
+    tokio::fs::create_dir_all(foreign_file.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&foreign_file, "unrelated application data")
+        .await
+        .unwrap();
+
+    RemoveArgs {
+        version: String::new(),
+        all: true,
+        path: Some(test_home),
+    }
+    .execute(CommandContext {
+        client: WasmEdgeApiClient::default(),
+        no_progress: true,
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        !managed_version.exists(),
+        "managed runtime should be removed"
+    );
+    assert!(
+        foreign_file.exists(),
+        "a semver-named directory without a WasmEdge payload must remain"
     );
 }
 

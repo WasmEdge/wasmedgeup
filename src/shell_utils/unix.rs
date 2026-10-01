@@ -62,7 +62,7 @@ pub fn setup_path(install_dir: &Path) -> Result<()> {
 }
 
 pub fn uninstall_path(install_dir: &Path) -> Result<()> {
-    for shell in get_available_shells() {
+    for shell in get_supported_shells() {
         let source_line = shell.source_line(install_dir);
         for rc in shell.effective_rc_files() {
             if !rc.exists() {
@@ -97,7 +97,7 @@ pub fn uninstall_path(install_dir: &Path) -> Result<()> {
         }
     }
 
-    for shell in get_available_shells() {
+    for shell in get_supported_shells() {
         let script = shell.env_script();
         let path = install_dir.join(script.name);
         if path.exists() {

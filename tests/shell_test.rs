@@ -126,6 +126,39 @@ mod setup_uninstall {
 
     #[test]
     #[serial]
+    fn test_uninstall_removes_scripts_for_unavailable_shells() {
+        let (_tmp_home, _home) = setup_test_environment();
+        let install_dir = tempfile::tempdir().unwrap();
+        let old_path = std::env::var_os("PATH");
+        let old_shell = std::env::var_os("SHELL");
+
+        for script in ["env", "env.fish", "env.nu"] {
+            fs::write(install_dir.path().join(script), "managed script").unwrap();
+        }
+
+        std::env::set_var("PATH", "");
+        std::env::set_var("SHELL", "/bin/sh");
+        shell_utils::uninstall_path(install_dir.path()).unwrap();
+
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_shell {
+            Some(shell) => std::env::set_var("SHELL", shell),
+            None => std::env::remove_var("SHELL"),
+        }
+
+        for script in ["env", "env.fish", "env.nu"] {
+            assert!(
+                !install_dir.path().join(script).exists(),
+                "uninstall must remove the managed {script} file even when its shell is unavailable"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
     fn test_no_rc_file() {
         let (_tmp_home, home) = setup_test_environment();
 
