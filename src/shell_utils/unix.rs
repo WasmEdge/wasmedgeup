@@ -167,9 +167,45 @@ impl ShellScript {
 }
 
 pub(crate) fn managed_shell_script_content(name: &str, install_dir: &Path) -> Option<String> {
+    managed_shell_script(name).map(|script| script.content(install_dir))
+}
+
+pub(crate) fn managed_shell_script_install_path(name: &str, content: &str) -> Option<PathBuf> {
+    const BIN_PLACEHOLDER: &str = "{WASMEDGE_BIN_DIR}";
+    const PLACEHOLDERS: [&str; 3] = [
+        BIN_PLACEHOLDER,
+        "{WASMEDGE_LIB_DIR}",
+        "{WASMEDGE_PLUGIN_DIR}",
+    ];
+
+    let script = managed_shell_script(name)?;
+    let (prefix, remainder) = script.template.split_once(BIN_PLACEHOLDER)?;
+    let next_placeholder = PLACEHOLDERS
+        .iter()
+        .filter_map(|placeholder| remainder.find(placeholder))
+        .min()
+        .unwrap_or(remainder.len());
+    let suffix = &remainder[..next_placeholder];
+    let rendered_remainder = content.strip_prefix(prefix)?;
+
+    for (end, _) in rendered_remainder.match_indices(suffix) {
+        let bin_dir = &rendered_remainder[..end];
+        let Some(install_dir) = bin_dir.strip_suffix("/bin") else {
+            continue;
+        };
+        let install_dir = PathBuf::from(install_dir);
+        if script.content(&install_dir) == content {
+            return Some(install_dir);
+        }
+    }
+
+    None
+}
+
+fn managed_shell_script(name: &str) -> Option<ShellScript> {
     get_supported_shells().into_iter().find_map(|shell| {
         let script = shell.env_script();
-        (script.name == name).then(|| script.content(install_dir))
+        (script.name == name).then_some(script)
     })
 }
 
@@ -394,4 +430,23 @@ fn append_file(path: &Path, line: &str) -> Result<()> {
     file.sync_data()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_script_path_round_trips_for_every_supported_format() {
+        let install_dir = Path::new("./relative install");
+
+        for name in ["env", "env.fish", "env.nu"] {
+            let content = managed_shell_script_content(name, install_dir).unwrap();
+            assert_eq!(
+                managed_shell_script_install_path(name, &content).as_deref(),
+                Some(install_dir),
+                "failed to recover the install path from {name}"
+            );
+        }
+    }
 }

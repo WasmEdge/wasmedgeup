@@ -1,5 +1,8 @@
 use crate::prelude::*;
-use std::path::{Path, PathBuf};
+use std::{
+    io::{self, ErrorKind},
+    path::{Path, PathBuf},
+};
 
 pub mod install;
 pub mod list;
@@ -19,6 +22,44 @@ pub fn resolve_install_path(path: Option<PathBuf>) -> Result<PathBuf> {
         Some(p) => Ok(p),
         None => default_path(),
     }
+}
+
+pub(crate) fn normalize_absolute_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let root = absolute
+        .ancestors()
+        .filter(|ancestor| ancestor.has_root())
+        .last()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "path has no filesystem root"))?;
+    let relative = absolute.strip_prefix(root).map_err(|_| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            "path could not be made relative to its filesystem root",
+        )
+    })?;
+    let mut components = Vec::new();
+
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(name) => components.push(name.to_os_string()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                components.pop().ok_or_else(|| {
+                    io::Error::new(ErrorKind::InvalidInput, "path escapes its filesystem root")
+                })?;
+            }
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "unexpected root component in path",
+                ));
+            }
+        }
+    }
+
+    let mut normalized = root.to_path_buf();
+    normalized.extend(components);
+    Ok(normalized)
 }
 
 pub fn insufficient_permissions(path: &Path, action: &str, version: &str) -> Error {
@@ -58,5 +99,13 @@ mod tests {
         let resolved = resolve_install_path(None).expect("default path");
         let expected = dirs::home_dir().expect("home dir").join(".wasmedge");
         assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn normalize_absolute_path_collapses_equivalent_relative_spellings() {
+        assert_eq!(
+            normalize_absolute_path(Path::new("relative-install")).unwrap(),
+            normalize_absolute_path(Path::new("./relative-install")).unwrap()
+        );
     }
 }

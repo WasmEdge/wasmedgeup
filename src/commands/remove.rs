@@ -3,23 +3,31 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use cap_std::{ambient_authority, fs::Dir};
+use cap_primitives::fs::FollowSymlinks;
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions},
+};
 use clap::Parser;
 use semver::Version;
 
 use crate::{
     cli::{CommandContext, CommandExecutor},
-    commands::resolve_install_path,
+    commands::{normalize_absolute_path, resolve_install_path},
     constants::{VERSION_INSTALL_MARKER, VERSION_INSTALL_MARKER_CONTENT},
     error::join_err_to_io_error,
     prelude::*,
     shell_utils::uninstall_path_configuration,
 };
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 use crate::shell_utils::managed_shell_script_content;
+#[cfg(unix)]
+use crate::shell_utils::managed_shell_script_install_path;
 
 const MANAGED_ROOT_LINKS: [&str; 4] = ["bin", "include", "lib", "plugin"];
+#[cfg(unix)]
+const MAX_MANAGED_SHELL_SCRIPT_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone)]
 struct ManagedRootLink {
@@ -116,10 +124,12 @@ impl CommandExecutor for RemoveArgs {
                 &managed_versions,
             )?;
             remove_all_versions(&versions_root, &managed_versions).await?;
-            if let Err(e) = uninstall_path_configuration(&configured_target_dir) {
-                tracing::warn!(error = %e.to_string(), "Failed to update shell rc files during --all removal");
-            }
-            remove_managed_shell_scripts(&install_root, &configured_target_dir)?;
+            cleanup_shell_integration(
+                &install_root,
+                &target_dir,
+                &configured_target_dir,
+                "during --all removal",
+            )?;
             remove_open_dir_if_empty(versions_root)?;
             cleanup_managed_root_entries(&install_root, &target_dir, &managed_links)?;
             remove_open_dir_if_empty(install_root)?;
@@ -177,18 +187,27 @@ impl CommandExecutor for RemoveArgs {
         };
 
         let removed_current = current_version.as_ref() == Some(&version);
-        let latest_version = latest_managed_version(&versions_root)?;
+        let latest_version = latest_usable_managed_version(&versions_root)?;
 
         if latest_version.is_none() {
-            tracing::debug!("No versions remaining, cleaning up configuration");
-            if let Err(e) = uninstall_path_configuration(&configured_target_dir) {
-                tracing::warn!(error = %e.to_string(), "Failed to update shell rc files when cleaning up last version");
-            }
-            remove_managed_shell_scripts(&install_root, &configured_target_dir)?;
+            let partial_versions_remain = !managed_versions(&versions_root)?.is_empty();
+            tracing::debug!("No usable versions remaining, cleaning up configuration");
+            cleanup_shell_integration(
+                &install_root,
+                &target_dir,
+                &configured_target_dir,
+                "when cleaning up last version",
+            )?;
             remove_open_dir_if_empty(versions_root)?;
             cleanup_managed_root_entries(&install_root, &target_dir, &managed_links_before)?;
             remove_open_dir_if_empty(install_root)?;
-            tracing::info!("All versions and configuration removed successfully");
+            if partial_versions_remain {
+                tracing::info!(
+                    "No usable versions remain; configuration removed and partial installs preserved"
+                );
+            } else {
+                tracing::info!("All versions and configuration removed successfully");
+            }
             return Ok(());
         }
 
@@ -211,44 +230,6 @@ impl CommandExecutor for RemoveArgs {
 
         Ok(())
     }
-}
-
-fn normalize_absolute_path(path: &Path) -> io::Result<PathBuf> {
-    let absolute = std::path::absolute(path)?;
-    let root = absolute
-        .ancestors()
-        .filter(|ancestor| ancestor.has_root())
-        .last()
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "path has no filesystem root"))?;
-    let relative = absolute.strip_prefix(root).map_err(|_| {
-        io::Error::new(
-            ErrorKind::InvalidInput,
-            "path could not be made relative to its filesystem root",
-        )
-    })?;
-    let mut components = Vec::new();
-
-    for component in relative.components() {
-        match component {
-            std::path::Component::Normal(name) => components.push(name.to_os_string()),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                components.pop().ok_or_else(|| {
-                    io::Error::new(ErrorKind::InvalidInput, "path escapes its filesystem root")
-                })?;
-            }
-            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidInput,
-                    "unexpected root component in path",
-                ));
-            }
-        }
-    }
-
-    let mut normalized = root.to_path_buf();
-    normalized.extend(components);
-    Ok(normalized)
 }
 
 fn open_install_root(path: &Path) -> io::Result<Dir> {
@@ -329,8 +310,22 @@ fn managed_versions(versions_dir: &Dir) -> Result<Vec<Version>> {
     Ok(versions)
 }
 
-fn latest_managed_version(versions_dir: &Dir) -> Result<Option<Version>> {
-    Ok(managed_versions(versions_dir)?.into_iter().max())
+fn latest_usable_managed_version(versions_dir: &Dir) -> Result<Option<Version>> {
+    let mut latest = None;
+
+    for version in managed_versions(versions_dir)? {
+        let name = version.to_string();
+        let Some(version_dir) = open_managed_version_dir(versions_dir, Path::new(&name))? else {
+            continue;
+        };
+        if cap_version_has_runtime(&version_dir)?
+            && latest.as_ref().is_none_or(|current| version > *current)
+        {
+            latest = Some(version);
+        }
+    }
+
+    Ok(latest)
 }
 
 fn open_managed_version_dir(versions_dir: &Dir, name: &Path) -> Result<Option<Dir>> {
@@ -352,18 +347,26 @@ fn open_managed_version_dir(versions_dir: &Dir, name: &Path) -> Result<Option<Di
         return Ok(Some(version_dir));
     }
 
-    for binary in ["bin/wasmedge", "bin/wasmedge.exe"] {
-        match version_dir.symlink_metadata(binary) {
-            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                return Ok(Some(version_dir));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+    if cap_version_has_runtime(&version_dir)? {
+        return Ok(Some(version_dir));
     }
 
     Ok(None)
+}
+
+fn cap_version_has_runtime(version_dir: &Dir) -> io::Result<bool> {
+    for binary in ["bin/wasmedge", "bin/wasmedge.exe"] {
+        match version_dir.symlink_metadata(binary) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                return Ok(true);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(false)
 }
 
 fn cap_file_matches(dir: &Dir, name: &str, expected: &str) -> io::Result<bool> {
@@ -379,9 +382,20 @@ fn cap_file_matches(dir: &Dir, name: &str, expected: &str) -> io::Result<bool> {
         return Ok(false);
     }
 
+    let mut options = OpenOptions::new();
+    options.read(true)._cap_fs_ext_follow(FollowSymlinks::No);
+    let file = match dir.open_with(name, &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() != expected.len() as u64 {
+        return Ok(false);
+    }
+
     let mut content = Vec::with_capacity(expected.len() + 1);
-    dir.open(name)?
-        .take(expected.len() as u64 + 1)
+    file.take(expected.len() as u64 + 1)
         .read_to_end(&mut content)?;
     Ok(content == expected.as_bytes())
 }
@@ -756,32 +770,109 @@ fn remove_open_dir_if_empty(dir: Dir) -> Result<bool> {
     }
 }
 
-#[cfg(unix)]
-fn remove_managed_shell_scripts(install_root: &Dir, configured_target_dir: &Path) -> Result<()> {
-    for name in ["env", "env.fish", "env.nu"] {
-        let Some(expected) = managed_shell_script_content(name, configured_target_dir) else {
-            continue;
-        };
-        let Some(quarantine) = quarantine_entry(install_root, name)? else {
-            continue;
-        };
-        let owned = cap_file_matches(&quarantine, "entry", &expected)?;
+fn cleanup_shell_integration(
+    install_root: &Dir,
+    target_dir: &Path,
+    configured_target_dir: &Path,
+    context: &str,
+) -> Result<()> {
+    let mut configuration_paths = vec![configured_target_dir.to_path_buf()];
+    for path in remove_managed_shell_scripts(install_root, target_dir)? {
+        if !configuration_paths.contains(&path) {
+            configuration_paths.push(path);
+        }
+    }
 
-        if owned {
-            quarantine.remove_file("entry")?;
-            quarantine.close()?;
-        } else {
-            restore_quarantined_entry(quarantine, install_root, name)?;
-            tracing::debug!(%name, "Preserving unowned env script");
+    for path in configuration_paths {
+        if let Err(error) = uninstall_path_configuration(&path) {
+            tracing::warn!(
+                error = %error.to_string(),
+                path = %path.display(),
+                "Failed to update shell configuration {context}"
+            );
         }
     }
 
     Ok(())
 }
 
+#[cfg(unix)]
+fn remove_managed_shell_scripts(install_root: &Dir, target_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut configured_paths = Vec::new();
+
+    for name in ["env", "env.fish", "env.nu"] {
+        let Some(quarantine) = quarantine_entry(install_root, name)? else {
+            continue;
+        };
+        let configured_path = cap_managed_shell_script_install_path(&quarantine, name, target_dir)?;
+
+        if let Some(configured_path) = configured_path {
+            quarantine.remove_file("entry")?;
+            quarantine.close()?;
+            if !configured_paths.contains(&configured_path) {
+                configured_paths.push(configured_path);
+            }
+        } else {
+            restore_quarantined_entry(quarantine, install_root, name)?;
+            tracing::debug!(%name, "Preserving unowned env script");
+        }
+    }
+
+    Ok(configured_paths)
+}
+
+#[cfg(unix)]
+fn cap_managed_shell_script_install_path(
+    dir: &Dir,
+    name: &str,
+    target_dir: &Path,
+) -> io::Result<Option<PathBuf>> {
+    let metadata = match dir.symlink_metadata("entry") {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_MANAGED_SHELL_SCRIPT_BYTES
+    {
+        return Ok(None);
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true)._cap_fs_ext_follow(FollowSymlinks::No);
+    let file = match dir.open_with("entry", &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_MANAGED_SHELL_SCRIPT_BYTES {
+        return Ok(None);
+    }
+
+    let mut content = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_MANAGED_SHELL_SCRIPT_BYTES + 1)
+        .read_to_end(&mut content)?;
+    if content.len() as u64 > MAX_MANAGED_SHELL_SCRIPT_BYTES {
+        return Ok(None);
+    }
+    let Ok(content) = String::from_utf8(content) else {
+        return Ok(None);
+    };
+    let Some(configured_path) = managed_shell_script_install_path(name, &content) else {
+        return Ok(None);
+    };
+
+    Ok(
+        (normalize_absolute_path(&configured_path).ok().as_deref() == Some(target_dir))
+            .then_some(configured_path),
+    )
+}
+
 #[cfg(windows)]
-fn remove_managed_shell_scripts(_install_root: &Dir, _configured_target_dir: &Path) -> Result<()> {
-    Ok(())
+fn remove_managed_shell_scripts(_install_root: &Dir, _target_dir: &Path) -> Result<Vec<PathBuf>> {
+    Ok(Vec::new())
 }
 
 #[cfg(unix)]
@@ -882,6 +973,25 @@ mod tests {
         assert!(
             !renamed_path.join("env").exists(),
             "managed script must be removed through the pinned root"
+        );
+    }
+
+    #[test]
+    fn shell_script_cleanup_preserves_template_for_another_root() {
+        let install = tempfile::tempdir().unwrap();
+        let install_path = std::fs::canonicalize(install.path()).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let other_path = std::fs::canonicalize(other.path()).unwrap();
+        let script = managed_shell_script_content("env", &other_path).unwrap();
+        std::fs::write(install_path.join("env"), script).unwrap();
+        let install_root = open_install_root(&install_path).unwrap();
+
+        let configured_paths = remove_managed_shell_scripts(&install_root, &install_path).unwrap();
+
+        assert!(configured_paths.is_empty());
+        assert!(
+            install_path.join("env").exists(),
+            "an official-looking script for another root must be preserved"
         );
     }
 
