@@ -1,3 +1,11 @@
+## 0.2.4 (2026-10-02)
+
+### Fixes
+
+- bound publication probe response bodies (#338)
+- bound remote release tag enumeration (#340)
+- constrain deletion to managed install paths (#341)
+
 ## 0.2.3 (2026-09-18)
 
 ### Fixes
