@@ -191,3 +191,33 @@ async fn test_plugin_install_latest_runtime_no_verify() {
     // unconditionally would fail this test.
     run_plugin_install_smoke(true).await;
 }
+
+#[tokio::test]
+#[serial]
+async fn test_plugin_install_rejects_unowned_semver_directory_before_download() {
+    let tmpdir = tempdir().unwrap();
+    let install_dir = tmpdir.path().join("install_target");
+    let foreign_version = install_dir.join("versions/9.9.9");
+    tokio::fs::create_dir_all(&foreign_version).await.unwrap();
+    let sentinel = foreign_version.join("unrelated");
+    tokio::fs::write(&sentinel, "preserve me").await.unwrap();
+
+    let args = PluginInstallArgs {
+        plugins: vec![PluginVersion::Name("wasi_nn".to_string())],
+        tmpdir: Some(tmpdir.path().to_path_buf()),
+        runtime: Some("9.9.9".to_string()),
+        path: Some(install_dir),
+        no_verify: true,
+    };
+    let result = args.execute(CommandContext::default()).await;
+
+    assert!(matches!(
+        result,
+        Err(wasmedgeup::error::Error::VersionNotFound { .. })
+    ));
+    assert_eq!(
+        tokio::fs::read_to_string(sentinel).await.unwrap(),
+        "preserve me"
+    );
+    assert!(!foreign_version.join("plugin").exists());
+}

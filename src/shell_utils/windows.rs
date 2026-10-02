@@ -1,4 +1,9 @@
-use crate::error::{Result, WindowsRegistrySnafu};
+use crate::{
+    commands::normalize_absolute_path,
+    error::{Result, WindowsRegistrySnafu},
+    shell_utils::ManagedShellScriptCleanup,
+};
+use cap_std::fs::Dir;
 use snafu::ResultExt;
 use std::path::Path;
 use winreg::enums::*;
@@ -40,7 +45,28 @@ pub fn setup_path(install_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn setup_path_in(
+    _install_root: &Dir,
+    _staging_root: &Dir,
+    install_dir: &Path,
+) -> Result<()> {
+    setup_path(install_dir)
+}
+
+pub(crate) fn validate_shell_configuration_path(_install_dir: &Path) -> Result<()> {
+    Ok(())
+}
+
 pub fn uninstall_path(install_dir: &Path) -> Result<()> {
+    uninstall_path_configuration(install_dir)?;
+    let target_dir = normalize_absolute_path(install_dir)?;
+    if target_dir != install_dir {
+        uninstall_path_configuration(&target_dir)?;
+    }
+    Ok(())
+}
+
+pub fn uninstall_path_configuration(install_dir: &Path) -> Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let env = hkcu
         .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
@@ -78,4 +104,15 @@ pub fn uninstall_path(install_dir: &Path) -> Result<()> {
         .context(WindowsRegistrySnafu)?;
 
     Ok(())
+}
+
+pub(crate) fn remove_managed_shell_scripts(
+    _install_root: &Dir,
+    _target_dir: &Path,
+    _configured_target_dir: &Path,
+) -> ManagedShellScriptCleanup {
+    ManagedShellScriptCleanup {
+        configured_paths: Vec::new(),
+        result: Ok(()),
+    }
 }

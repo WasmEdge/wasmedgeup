@@ -1,14 +1,17 @@
 use std::path::{Path, PathBuf};
 
+use cap_std::fs::Dir;
 use clap::{value_parser, Args};
-use tokio::fs;
 use walkdir::WalkDir;
 
 use crate::api::{plugin_archive_name, plugin_asset_url, WasmEdgeApiClient};
 use crate::system::plugins::plugin_platform_key;
 use crate::{
     cli::{CommandContext, CommandExecutor},
-    commands::resolve_install_path,
+    commands::{
+        resolve_normalized_install_path,
+        runtime::{open_install_root, open_versions_root, select_usable_managed_runtime},
+    },
     error::{Error, Result},
     fs as wfs, system,
 };
@@ -84,16 +87,30 @@ impl CommandExecutor for PluginInstallArgs {
             return Err(Error::NoPluginsSpecified);
         }
 
-        let versions_dir = resolve_install_path(self.path.clone())?.join("versions");
-        let runtime_version = select_runtime_version(&versions_dir, self.runtime.as_deref())?;
-        let version_dir = versions_dir.join(runtime_version.to_string());
-
-        if !version_dir.exists() {
+        let target_dir = resolve_normalized_install_path(self.path.clone())?;
+        let Some(install_root) = open_install_root(&target_dir)? else {
             return Err(Error::VersionNotFound {
-                version: runtime_version.to_string(),
+                version: self
+                    .runtime
+                    .clone()
+                    .unwrap_or_else(|| "<none installed>".to_string()),
             });
-        }
-        if !wfs::can_write_to_directory(&version_dir) {
+        };
+        let Some(versions_root) = open_versions_root(&install_root, &target_dir)? else {
+            return Err(Error::VersionNotFound {
+                version: self
+                    .runtime
+                    .clone()
+                    .unwrap_or_else(|| "<none installed>".to_string()),
+            });
+        };
+        let (runtime_version, version_root) =
+            select_runtime_version(&versions_root, self.runtime.as_deref())?;
+        let version_dir = target_dir
+            .join("versions")
+            .join(runtime_version.to_string());
+
+        if !wfs::can_write_to_cap_directory(&version_root) {
             return Err(crate::commands::insufficient_permissions(
                 &version_dir,
                 "write to target version directory",
@@ -103,7 +120,14 @@ impl CommandExecutor for PluginInstallArgs {
 
         let specs = system::detect();
         let dest_plugin = version_dir.join("plugin");
-        fs::create_dir_all(&dest_plugin).await?;
+        let dest_plugin_root =
+            wfs::open_or_create_cap_dir_nofollow(&version_root, Path::new("plugin")).map_err(
+                |source| Error::Io {
+                    action: "open plugin directory".to_string(),
+                    path: dest_plugin.display().to_string(),
+                    source,
+                },
+            )?;
 
         // Windows ships zip archives; other platforms ship tar.gz. The local
         // boolean is named for the *archive format* (what the call sites
@@ -176,7 +200,7 @@ impl CommandExecutor for PluginInstallArgs {
             wfs::extract_archive(file, workspace_dir).await?;
 
             let paths = find_plugin_shared_objects(workspace_dir);
-            let copied = copy_plugin_shared_objects(&paths, &dest_plugin).await;
+            let copied = copy_plugin_shared_objects(&paths, &dest_plugin_root, &dest_plugin).await;
 
             if copied == 0 {
                 // Nothing landed in `dest_plugin` — either the archive held no
@@ -224,18 +248,10 @@ impl CommandExecutor for PluginInstallArgs {
 }
 
 pub(super) fn select_runtime_version(
-    versions_dir: &Path,
+    versions_root: &Dir,
     requested: Option<&str>,
-) -> Result<semver::Version> {
-    if let Some(ver) = requested {
-        return semver::Version::parse(ver).map_err(|source| Error::SemVer { source });
-    }
-    match crate::api::latest_installed_version(versions_dir)? {
-        Some(v) => Ok(v),
-        None => Err(Error::VersionNotFound {
-            version: "<none installed>".to_string(),
-        }),
-    }
+) -> Result<(semver::Version, Dir)> {
+    select_usable_managed_runtime(versions_root, requested, "<none installed>")
 }
 
 /// Copy each discovered plugin shared object in `paths` into `dest_plugin`,
@@ -243,19 +259,17 @@ pub(super) fn select_runtime_version(
 /// and counted as failures (not aborts) so one unreadable file does not lose
 /// the rest; the caller treats a zero return as "nothing was installed" rather
 /// than reporting a false success.
-async fn copy_plugin_shared_objects(paths: &[PathBuf], dest_plugin: &Path) -> usize {
+async fn copy_plugin_shared_objects(
+    paths: &[PathBuf],
+    dest_plugin_root: &Dir,
+    dest_plugin: &Path,
+) -> usize {
     let mut copied = 0usize;
     for src in paths {
         let file_name = src.file_name().unwrap_or_default();
         let dest = dest_plugin.join(file_name);
-        if let Some(parent) = dest.parent() {
-            if let Err(e) = fs::create_dir_all(parent).await {
-                tracing::warn!(error = %e, path = %parent.display(), "Failed to create parent directory for plugin");
-                continue;
-            }
-        }
-        match fs::copy(src, &dest).await {
-            Ok(_) => {
+        match wfs::copy_file_to_cap_dir(src, dest_plugin_root, file_name, &dest).await {
+            Ok(()) => {
                 copied += 1;
                 tracing::debug!(from = %src.display(), to = %dest.display(), "Copied plugin shared object");
             }
@@ -270,6 +284,7 @@ async fn copy_plugin_shared_objects(paths: &[PathBuf], dest_plugin: &Path) -> us
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cap_std::ambient_authority;
 
     #[test]
     fn staging_parent_has_no_predictable_subdir() {
@@ -306,8 +321,9 @@ mod tests {
         let b = src_dir.path().join("libb.so");
         std::fs::write(&a, b"a").unwrap();
         std::fs::write(&b, b"b").unwrap();
+        let dest_root = Dir::open_ambient_dir(dest.path(), ambient_authority()).unwrap();
 
-        let copied = copy_plugin_shared_objects(&[a, b], dest.path()).await;
+        let copied = copy_plugin_shared_objects(&[a, b], &dest_root, dest.path()).await;
 
         assert_eq!(copied, 2);
         assert!(dest.path().join("liba.so").exists());
@@ -321,8 +337,11 @@ mod tests {
         // copy fails. Pre-fix this still reported "Installed successfully"
         // because the count came from candidates, not successful copies.
         let missing = dest.path().join("missing-src").join("libplugin.so");
+        let dest_root = Dir::open_ambient_dir(dest.path(), ambient_authority()).unwrap();
 
-        let copied = copy_plugin_shared_objects(std::slice::from_ref(&missing), dest.path()).await;
+        let copied =
+            copy_plugin_shared_objects(std::slice::from_ref(&missing), &dest_root, dest.path())
+                .await;
 
         assert_eq!(copied, 0);
     }
@@ -334,8 +353,9 @@ mod tests {
         let good = src_dir.path().join("libgood.so");
         std::fs::write(&good, b"ok").unwrap();
         let missing = src_dir.path().join("libmissing.so"); // never created
+        let dest_root = Dir::open_ambient_dir(dest.path(), ambient_authority()).unwrap();
 
-        let copied = copy_plugin_shared_objects(&[good, missing], dest.path()).await;
+        let copied = copy_plugin_shared_objects(&[good, missing], &dest_root, dest.path()).await;
 
         assert_eq!(copied, 1);
     }

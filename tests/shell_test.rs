@@ -126,6 +126,62 @@ mod setup_uninstall {
 
     #[test]
     #[serial]
+    fn test_uninstall_removes_scripts_for_unavailable_shells() {
+        let (_tmp_home, _home) = setup_test_environment();
+        let install_dir = tempfile::tempdir().unwrap();
+        let fake_bin = tempfile::tempdir().unwrap();
+        let old_path = std::env::var_os("PATH");
+        let old_shell = std::env::var_os("SHELL");
+
+        for shell in ["fish", "nu"] {
+            fs::write(fake_bin.path().join(shell), "available for test").unwrap();
+        }
+        std::env::set_var("PATH", fake_bin.path());
+        std::env::set_var("SHELL", "/bin/sh");
+        shell_utils::setup_path(install_dir.path()).unwrap();
+
+        std::env::set_var("PATH", "");
+        shell_utils::uninstall_path(install_dir.path()).unwrap();
+
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_shell {
+            Some(shell) => std::env::set_var("SHELL", shell),
+            None => std::env::remove_var("SHELL"),
+        }
+
+        for script in ["env", "env.fish", "env.nu"] {
+            assert!(
+                !install_dir.path().join(script).exists(),
+                "uninstall must remove the managed {script} file even when its shell is unavailable"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_uninstall_preserves_unowned_scripts() {
+        let (_tmp_home, _home) = setup_test_environment();
+        let install_dir = tempfile::tempdir().unwrap();
+
+        for script in ["env", "env.fish", "env.nu"] {
+            fs::write(install_dir.path().join(script), "foreign script").unwrap();
+        }
+
+        shell_utils::uninstall_path(install_dir.path()).unwrap();
+
+        for script in ["env", "env.fish", "env.nu"] {
+            assert_eq!(
+                fs::read_to_string(install_dir.path().join(script)).unwrap(),
+                "foreign script"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
     fn test_no_rc_file() {
         let (_tmp_home, home) = setup_test_environment();
 
@@ -249,6 +305,32 @@ mod setup_uninstall {
         let rc_after = fs::read_to_string(&zshenv).unwrap_or_default();
         assert!(rc_after.contains(existing));
         assert!(!rc_after.contains(&expected_source));
+    }
+
+    #[test]
+    #[serial]
+    fn test_uninstall_removes_legacy_multiline_source_stanza_only_at_boundaries() {
+        let (_tmp_home, home) = setup_test_environment();
+        let profile = home.join(".profile");
+        let install_dir =
+            std::path::PathBuf::from("/tmp/legacy-install\"\nprintf legacy-injection\n#");
+        let source_line = format!(r#". "{}/env""#, install_dir.display());
+
+        fs::write(
+            &profile,
+            format!("# keep before\n{source_line}\n# keep after\n"),
+        )
+        .unwrap();
+        shell_utils::uninstall_path_configuration(&install_dir).unwrap();
+        assert_eq!(
+            fs::read_to_string(&profile).unwrap(),
+            "# keep before\n# keep after\n"
+        );
+
+        let embedded = format!("# keep before\nprefix{source_line}\n# keep after\n");
+        fs::write(&profile, &embedded).unwrap();
+        shell_utils::uninstall_path_configuration(&install_dir).unwrap();
+        assert_eq!(fs::read_to_string(&profile).unwrap(), embedded);
     }
 }
 

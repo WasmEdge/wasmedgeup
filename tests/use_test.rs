@@ -160,6 +160,11 @@ async fn test_use_latest_picks_highest_local_version_not_remote() {
         .await
         .unwrap();
     }
+    // A higher semver directory without a WasmEdge runtime is unrelated data
+    // and must not win local `latest` selection.
+    tokio::fs::create_dir_all(test_home.join("versions/99.0.0"))
+        .await
+        .unwrap();
 
     let args = UseArgs {
         version: "latest".to_string(),
@@ -189,6 +194,9 @@ async fn test_use_refuses_to_replace_existing_real_directory() {
             .await
             .unwrap();
     }
+    tokio::fs::write(version_dir.join("bin/wasmedge"), "mock runtime")
+        .await
+        .unwrap();
 
     // A real, non-WasmEdge directory already living at `<test_home>/bin`.
     let preexisting_bin = test_home.join("bin");
@@ -211,6 +219,42 @@ async fn test_use_refuses_to_replace_existing_real_directory() {
         preexisting_bin.join("do-not-delete").exists(),
         "existing directory contents must be preserved (not deleted)"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_use_rejects_unowned_semver_directory() {
+    let (_tempdir, test_home) = test_utils::setup_test_environment();
+    let foreign_version = test_home.join("versions/9.9.9");
+    tokio::fs::create_dir_all(&foreign_version).await.unwrap();
+    tokio::fs::write(foreign_version.join("unrelated"), "preserve me")
+        .await
+        .unwrap();
+
+    let args = UseArgs {
+        version: "9.9.9".to_string(),
+        path: Some(test_home.clone()),
+    };
+    let result = args.execute(CommandContext::default()).await;
+
+    assert!(matches!(
+        result,
+        Err(wasmedgeup::error::Error::VersionNotFound { .. })
+    ));
+    assert_eq!(
+        tokio::fs::read_to_string(foreign_version.join("unrelated"))
+            .await
+            .unwrap(),
+        "preserve me"
+    );
+    for name in ["bin", "include", "lib", "plugin"] {
+        assert!(
+            tokio::fs::symlink_metadata(test_home.join(name))
+                .await
+                .is_err(),
+            "unowned runtime selection must not create the root {name} link"
+        );
+    }
 }
 
 async fn verify_symlinks(base_dir: &Path, expected_version: &str) {
