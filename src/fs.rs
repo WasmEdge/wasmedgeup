@@ -1332,6 +1332,29 @@ pub(crate) fn create_version_symlinks_in(
     version: &str,
 ) -> Result<()> {
     validate_version_component(version)?;
+    replace_version_symlinks_in(
+        install_root,
+        version_root,
+        base_dir,
+        version,
+        create_version_symlink,
+    )
+}
+
+struct PendingVersionSymlink {
+    name: &'static str,
+    display_path: PathBuf,
+    target_path: PathBuf,
+    original: Option<cap_tempfile::TempDir>,
+}
+
+fn replace_version_symlinks_in(
+    install_root: &Dir,
+    version_root: &Dir,
+    base_dir: &Path,
+    version: &str,
+    mut create_link: impl FnMut(&Dir, &Path, &str) -> io::Result<()>,
+) -> Result<()> {
     let symlink_dirs = ["bin", "include", "lib", "plugin"];
 
     // Keep replacement quarantines inside the selected version tree. A crash
@@ -1372,19 +1395,33 @@ pub(crate) fn create_version_symlinks_in(
         }
     }
 
+    let mut pending = Vec::with_capacity(symlink_dirs.len());
     for dir in symlink_dirs {
         let symlink_path = base_dir.join(dir);
         let target_path = PathBuf::from("versions").join(version).join(dir);
-        let quarantine = quarantine_entry_in(install_root, dir, version_root).context(IoSnafu {
-            path: symlink_path.display().to_string(),
-            action: "quarantine old symlink".to_string(),
-        })?;
+        let mut quarantine = match quarantine_entry_in(install_root, dir, version_root) {
+            Ok(quarantine) => quarantine,
+            Err(source) => {
+                restore_pending_version_symlinks(&mut pending, install_root)?;
+                return Err(Error::Io {
+                    action: "quarantine old symlink".to_string(),
+                    path: symlink_path.display().to_string(),
+                    source,
+                });
+            }
+        };
 
-        if let Some(quarantine) = quarantine {
-            let metadata = match quarantine.symlink_metadata("entry") {
+        if let Some(quarantined_entry) = quarantine.as_ref() {
+            let metadata = match quarantined_entry.symlink_metadata("entry") {
                 Ok(metadata) => metadata,
                 Err(source) => {
-                    restore_quarantined_entry(quarantine, install_root, dir)?;
+                    let quarantine = quarantine.take().expect("checked above");
+                    restore_current_and_pending_version_symlinks(
+                        quarantine,
+                        dir,
+                        &mut pending,
+                        install_root,
+                    )?;
                     return Err(Error::Io {
                         action: "inspect quarantined symlink".to_string(),
                         path: symlink_path.display().to_string(),
@@ -1393,7 +1430,13 @@ pub(crate) fn create_version_symlinks_in(
                 }
             };
             if !metadata.file_type().is_symlink() {
-                restore_quarantined_entry(quarantine, install_root, dir)?;
+                let quarantine = quarantine.take().expect("checked above");
+                restore_current_and_pending_version_symlinks(
+                    quarantine,
+                    dir,
+                    &mut pending,
+                    install_root,
+                )?;
                 return InvalidPathSnafu {
                     path: symlink_path.display().to_string(),
                     reason: format!(
@@ -1402,34 +1445,132 @@ pub(crate) fn create_version_symlinks_in(
                 }
                 .fail();
             }
-
-            if let Err(source) = create_version_symlink(install_root, &target_path, dir) {
-                restore_quarantined_entry(quarantine, install_root, dir)?;
-                return Err(Error::Io {
-                    action: "create symlink".to_string(),
-                    path: symlink_path.display().to_string(),
-                    source,
-                });
-            }
-
-            remove_quarantined_symlink(&quarantine, "entry").context(IoSnafu {
-                path: symlink_path.display().to_string(),
-                action: "remove old symlink".to_string(),
-            })?;
-            quarantine.close().context(IoSnafu {
-                path: symlink_path.display().to_string(),
-                action: "remove old symlink quarantine".to_string(),
-            })?;
-        } else {
-            create_version_symlink(install_root, &target_path, dir).context(IoSnafu {
-                path: symlink_path.display().to_string(),
-                action: "create symlink".to_string(),
-            })?;
         }
-        tracing::debug!(symlink = %symlink_path.display(), target = %target_path.display(), "Created symlink");
+
+        pending.push(PendingVersionSymlink {
+            name: dir,
+            display_path: symlink_path,
+            target_path,
+            original: quarantine,
+        });
+    }
+
+    for (created, index) in (0..pending.len()).enumerate() {
+        let create_result = {
+            let change = &pending[index];
+            create_link(install_root, &change.target_path, change.name)
+        };
+        if let Err(source) = create_result {
+            let error_path = pending[index].display_path.display().to_string();
+            let create_error = Error::Io {
+                action: "create symlink".to_string(),
+                path: error_path,
+                source,
+            };
+            if let Err(rollback_error) =
+                rollback_version_symlink_switch(&mut pending, created, install_root, version_root)
+            {
+                tracing::error!(error = %create_error, "Root-link switch failed before rollback also failed");
+                return Err(rollback_error);
+            }
+            return Err(create_error);
+        }
+    }
+
+    for change in &mut pending {
+        if let Some(quarantine) = change.original.take() {
+            if let Err(error) = remove_quarantined_symlink(&quarantine, "entry") {
+                tracing::warn!(%error, path = %change.display_path.display(), "Failed to remove replaced root link from quarantine");
+                continue;
+            }
+            if let Err(error) = quarantine.close() {
+                tracing::warn!(%error, path = %change.display_path.display(), "Failed to remove empty root-link quarantine");
+            }
+        }
+        tracing::debug!(symlink = %change.display_path.display(), target = %change.target_path.display(), "Created symlink");
     }
 
     Ok(())
+}
+
+fn restore_current_and_pending_version_symlinks(
+    current: cap_tempfile::TempDir,
+    current_name: &str,
+    pending: &mut [PendingVersionSymlink],
+    install_root: &Dir,
+) -> Result<()> {
+    let current_error = restore_quarantined_entry(current, install_root, current_name)
+        .err()
+        .map(Error::from);
+    let pending_error = restore_pending_version_symlinks(pending, install_root).err();
+    if let Some(error) = current_error.or(pending_error) {
+        Err(error)
+    } else {
+        Ok(())
+    }
+}
+
+fn restore_pending_version_symlinks(
+    pending: &mut [PendingVersionSymlink],
+    install_root: &Dir,
+) -> Result<()> {
+    let mut first_error = None;
+    for change in pending.iter_mut().rev() {
+        let Some(quarantine) = change.original.take() else {
+            continue;
+        };
+        if let Err(error) = restore_quarantined_entry(quarantine, install_root, change.name) {
+            first_error.get_or_insert_with(|| Error::from(error));
+        }
+    }
+    if let Some(error) = first_error {
+        Err(error)
+    } else {
+        Ok(())
+    }
+}
+
+fn rollback_version_symlink_switch(
+    pending: &mut [PendingVersionSymlink],
+    created: usize,
+    install_root: &Dir,
+    quarantine_root: &Dir,
+) -> Result<()> {
+    let mut first_error = None;
+
+    for change in pending.iter().take(created) {
+        let result = (|| -> io::Result<()> {
+            let Some(quarantine) = quarantine_entry_in(install_root, change.name, quarantine_root)?
+            else {
+                return Ok(());
+            };
+            let still_created = quarantine
+                .symlink_metadata("entry")
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && quarantine
+                    .read_link_contents("entry")
+                    .is_ok_and(|target| target == change.target_path);
+            if still_created {
+                remove_quarantined_symlink(&quarantine, "entry")?;
+                quarantine.close()
+            } else {
+                restore_quarantined_entry(quarantine, install_root, change.name)
+            }
+        })();
+        if let Err(error) = result {
+            first_error.get_or_insert_with(|| Error::from(error));
+        }
+    }
+
+    if let Err(error) = restore_pending_version_symlinks(pending, install_root) {
+        first_error.get_or_insert(error);
+    }
+
+    if let Some(error) = first_error {
+        Err(error)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -1744,6 +1885,55 @@ mod tests {
             version_entries,
             ["bin", "include", "lib", "plugin"].map(std::ffi::OsString::from),
             "successful replacement must remove its internal quarantine directories"
+        );
+    }
+
+    #[test]
+    fn version_symlink_switch_rolls_back_every_link_after_midway_failure() {
+        let base = tempdir().unwrap();
+        let old_target = tempdir().unwrap();
+        let version = "0.15.0";
+        let version_path = base.path().join("versions").join(version);
+
+        for dir in ["bin", "include", "lib", "plugin"] {
+            std::fs::create_dir_all(version_path.join(dir)).unwrap();
+            std::os::unix::fs::symlink(old_target.path(), base.path().join(dir)).unwrap();
+        }
+        let install_root = Dir::open_ambient_dir(base.path(), ambient_authority()).unwrap();
+        let version_root =
+            open_cap_dir_nofollow(&install_root, &PathBuf::from("versions").join(version)).unwrap();
+
+        let result = replace_version_symlinks_in(
+            &install_root,
+            &version_root,
+            base.path(),
+            version,
+            |dir, target, name| {
+                if name == "lib" {
+                    Err(io::Error::other("simulated link creation failure"))
+                } else {
+                    create_version_symlink(dir, target, name)
+                }
+            },
+        );
+
+        assert!(result.is_err());
+        for dir in ["bin", "include", "lib", "plugin"] {
+            assert_eq!(
+                std::fs::read_link(base.path().join(dir)).unwrap(),
+                old_target.path(),
+                "every original link must be restored after a partial switch"
+            );
+        }
+        let mut version_entries = std::fs::read_dir(&version_path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        version_entries.sort();
+        assert_eq!(
+            version_entries,
+            ["bin", "include", "lib", "plugin"].map(std::ffi::OsString::from),
+            "rollback must remove every internal quarantine directory"
         );
     }
 

@@ -315,7 +315,7 @@ fn retarget_removed_version_links(
     managed_links: &[ManagedRootLink],
     switch_current_version: bool,
 ) -> Result<()> {
-    for name in MANAGED_ROOT_LINKS {
+    attempt_all_managed_root_link_updates(|name| {
         let display_path = target_dir.join(name);
         let managed_link = managed_links.iter().find(|link| link.name == name);
         let replace = managed_link
@@ -323,7 +323,7 @@ fn retarget_removed_version_links(
 
         if !replace && !(switch_current_version && managed_link.is_none()) {
             tracing::debug!(path = %display_path.display(), "Preserving unmanaged install-root entry");
-            continue;
+            return Ok(());
         }
 
         let removed = match managed_link {
@@ -343,7 +343,7 @@ fn retarget_removed_version_links(
                     name,
                 )?;
             }
-            continue;
+            return Ok(());
         }
         create_managed_root_link(
             install_root,
@@ -351,9 +351,8 @@ fn retarget_removed_version_links(
             &replacement_version.to_string(),
             name,
         )?;
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 fn cleanup_managed_root_entries(
@@ -361,15 +360,34 @@ fn cleanup_managed_root_entries(
     target_dir: &Path,
     managed_links: &[ManagedRootLink],
 ) -> Result<()> {
-    for name in MANAGED_ROOT_LINKS {
+    attempt_all_managed_root_link_updates(|name| {
         let path = target_dir.join(name);
         if let Some(link) = managed_links.iter().find(|link| link.name == name) {
             quarantine_managed_root_link(install_root, link)?;
         } else if install_root.symlink_metadata(name).is_ok() {
             tracing::debug!(path = %path.display(), "Preserving unmanaged install-root entry");
         }
+        Ok(())
+    })
+}
+
+fn attempt_all_managed_root_link_updates(
+    mut update: impl FnMut(&'static str) -> Result<()>,
+) -> Result<()> {
+    let mut first_error = None;
+    for name in MANAGED_ROOT_LINKS {
+        if let Err(error) = update(name) {
+            tracing::warn!(%error, link = name, "Managed root-link update failed; continuing with remaining links");
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
     }
-    Ok(())
+    if let Some(error) = first_error {
+        Err(error)
+    } else {
+        Ok(())
+    }
 }
 
 fn managed_root_links(
@@ -944,6 +962,27 @@ mod tests {
         assert!(
             install_path.join("versions").is_dir(),
             "the versions directory must remain so root-link cleanup can be retried"
+        );
+    }
+
+    #[test]
+    fn root_link_updates_continue_after_an_intermediate_failure() {
+        let mut visited = Vec::new();
+
+        let error = attempt_all_managed_root_link_updates(|name| {
+            visited.push(name);
+            match name {
+                "include" => Err(std::io::Error::other("first failure").into()),
+                "plugin" => Err(std::io::Error::other("later failure").into()),
+                _ => Ok(()),
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(visited, MANAGED_ROOT_LINKS);
+        assert!(
+            error.to_string().contains("first failure"),
+            "the first error must be retained after later links are attempted"
         );
     }
 
