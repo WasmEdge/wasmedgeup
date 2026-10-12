@@ -13,7 +13,7 @@ license = "Apache-2.0"
 cfg-if = "1.0.4"
 clap = { version = "4.6.1", features = ["derive"] }
 dirs = "7.0.0"
-gix = { version = "0.88.0", default-features = false, features = ["blocking-http-transport-reqwest-rust-tls", "max-performance-safe", "sha1"] }
+gix = { version = "0.89.0", default-features = false, features = ["blocking-http-transport-reqwest-rust-tls", "max-performance-safe", "sha1"] }
 indicatif = { version = "0.18.4", features = ["tokio"] }
 reqwest = "0.13.4"
 semver = "1.0.28"
@@ -42,7 +42,7 @@ rustix = { version = "1.1.4", features = ["fs"] }
 tar = "0.4.46"
 
 [target.'cfg(windows)'.dependencies]
-zip = "8.6.0"
+zip = "9.0.0"
 winreg = "0.56"
 nvml-wrapper = "0.13.0"
 wmi = "0.18.4"
