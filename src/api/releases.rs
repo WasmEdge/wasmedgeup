@@ -93,7 +93,7 @@ impl<R: io::BufRead> io::BufRead for BoundedReader<R> {
 }
 
 impl<R: ReadlineBufRead> ReadlineBufRead for BoundedReader<R> {
-    fn readline(&mut self) -> Option<io::Result<gix::ExnMessageResult<PacketLineRef<'_>>>> {
+    fn readline(&mut self) -> Option<io::Result<gix::Result<PacketLineRef<'_>>>> {
         let limit = self.limit;
         let remaining = &mut self.remaining;
         let result = self.inner.readline()?;
@@ -166,7 +166,7 @@ impl<H: Http> Http for BoundedHttp<H> {
         url: &str,
         base_url: &str,
         headers: impl IntoIterator<Item = impl AsRef<str>>,
-    ) -> gix::ExnMessageResult<GetResponse<Self::Headers, Self::ResponseBody>> {
+    ) -> gix::Result<GetResponse<Self::Headers, Self::ResponseBody>> {
         self.inner
             .get(url, base_url, headers)
             .map(|response| GetResponse {
@@ -181,8 +181,7 @@ impl<H: Http> Http for BoundedHttp<H> {
         base_url: &str,
         headers: impl IntoIterator<Item = impl AsRef<str>>,
         body: PostBodyDataKind,
-    ) -> gix::ExnMessageResult<PostResponse<Self::Headers, Self::ResponseBody, Self::PostBody>>
-    {
+    ) -> gix::Result<PostResponse<Self::Headers, Self::ResponseBody, Self::PostBody>> {
         self.inner
             .post(url, base_url, headers, body)
             .map(|response| PostResponse {
@@ -192,7 +191,7 @@ impl<H: Http> Http for BoundedHttp<H> {
             })
     }
 
-    fn configure(&mut self, config: &dyn Any) -> gix::ExnResult {
+    fn configure(&mut self, config: &dyn Any) -> gix::Result {
         self.inner.configure(config)
     }
 
@@ -236,7 +235,7 @@ impl<T: TransportWithoutIO> TransportWithoutIO for BoundedTransport<T> {
         self.inner.connection_persists_across_multiple_requests()
     }
 
-    fn configure(&mut self, config: &dyn Any) -> gix::ExnResult {
+    fn configure(&mut self, config: &dyn Any) -> gix::Result {
         self.inner.configure(config)
     }
 }
@@ -480,7 +479,7 @@ mod tests {
             _url: &str,
             _base_url: &str,
             _headers: impl IntoIterator<Item = impl AsRef<str>>,
-        ) -> gix::ExnMessageResult<GetResponse<Self::Headers, Self::ResponseBody>> {
+        ) -> gix::Result<GetResponse<Self::Headers, Self::ResponseBody>> {
             Ok(GetResponse {
                 headers: Cursor::new(Vec::new()),
                 body: Cursor::new(self.body.clone()),
@@ -493,8 +492,7 @@ mod tests {
             _base_url: &str,
             _headers: impl IntoIterator<Item = impl AsRef<str>>,
             _body: PostBodyDataKind,
-        ) -> gix::ExnMessageResult<PostResponse<Self::Headers, Self::ResponseBody, Self::PostBody>>
-        {
+        ) -> gix::Result<PostResponse<Self::Headers, Self::ResponseBody, Self::PostBody>> {
             Ok(PostResponse {
                 post_body: Cursor::new(Vec::new()),
                 headers: Cursor::new(Vec::new()),
@@ -502,7 +500,7 @@ mod tests {
             })
         }
 
-        fn configure(&mut self, _config: &dyn Any) -> gix::ExnResult {
+        fn configure(&mut self, _config: &dyn Any) -> gix::Result {
             Ok(())
         }
     }
