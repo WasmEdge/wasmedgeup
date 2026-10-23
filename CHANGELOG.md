@@ -1,3 +1,9 @@
+## 0.2.5 (2026-10-23)
+
+### Fixes
+
+- bump rustls, rustls-webpki, webpki-root-certs to fix RUSTSEC-2026-0346..0349/0382/0383 (#358)
+
 ## 0.2.4 (2026-10-02)
 
 ### Fixes
