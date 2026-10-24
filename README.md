@@ -24,6 +24,8 @@ cargo install wasmedgeup
 
 Download a pre-built binary from the [GitHub releases page](https://github.com/WasmEdge/wasmedgeup/releases).
 
+Linux GNU builds require glibc 2.28 or newer; musl builds are static.
+
 | Target | OS | Arch |
 | --- | --- | --- |
 | `x86_64-unknown-linux-gnu` | Linux | x86_64 |
