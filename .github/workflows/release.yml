@@ -50,12 +50,34 @@ jobs:
         run: sudo apt-get install -y musl-tools
 
       - name: Setup cross-compilation toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-musl'
+        if: matrix.target == 'aarch64-unknown-linux-musl'
         uses: taiki-e/setup-cross-toolchain-action@12b7ad4acfa95a1476779d6c06699b96ec1691f8 # v1
         with:
           target: ${{ matrix.target }}
 
+      - name: Install GNU build toolchain
+        if: endsWith(matrix.target, '-linux-gnu')
+        run: |
+          python3 -m venv "$RUNNER_TEMP/zigbuild"
+          "$RUNNER_TEMP/zigbuild/bin/pip" install --require-hashes --only-binary=:all: --no-deps \
+            -r .github/zigbuild-requirements.txt
+          echo "$RUNNER_TEMP/zigbuild/bin" >> "$GITHUB_PATH"
+
+      - name: Build GNU artifact
+        if: endsWith(matrix.target, '-linux-gnu')
+        run: cargo zigbuild --release --target ${{ matrix.target }}.2.28
+
+      - name: Check GNU glibc requirement
+        if: endsWith(matrix.target, '-linux-gnu')
+        shell: bash
+        run: |
+          max_glibc=$(readelf --version-info target/${{ matrix.target }}/release/${{ env.package_name }} |
+            grep -oE 'GLIBC_[0-9]+(\.[0-9]+)*' | sort -Vu | tail -n 1)
+          echo "Highest required glibc version: $max_glibc"
+          test "$(printf '%s\n' GLIBC_2.28 "$max_glibc" | sort -V | tail -n 1)" = GLIBC_2.28
+
       - name: Build
+        if: "!endsWith(matrix.target, '-linux-gnu')"
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Set archive name (non-windows)
