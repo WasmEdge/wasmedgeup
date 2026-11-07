@@ -305,7 +305,5 @@ pub fn platform_fallbacks(primary: &str, runtime: &str) -> Vec<String> {
     } else if primary.starts_with(MANYLINUX2014_PREFIX) && rt_ge_015 {
         out.push(primary.replacen(MANYLINUX2014_PREFIX, MANYLINUX_2_28_PREFIX, 1));
     }
-    out.sort();
-    out.dedup();
     out
 }

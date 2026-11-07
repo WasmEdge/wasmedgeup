@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::{tempdir, TempDir};
 use wasmedgeup::{
-    api::WasmEdgeApiClient,
+    api::{plugin_asset_url, WasmEdgeApiClient},
     cli::{CommandContext, CommandExecutor},
     commands::install::InstallArgs,
     commands::plugin::{install::PluginInstallArgs, version::PluginVersion},
@@ -96,19 +96,10 @@ async fn run_plugin_install_smoke(no_verify: bool) {
     let http = reqwest::Client::new();
     let mut chosen: Option<String> = None;
     for name in candidates {
-        let ext = if matches!(specs.os.os_type, TargetOS::Windows) {
-            "zip"
-        } else {
-            "tar.gz"
-        };
-        let url = format!(
-            "https://github.com/WasmEdge/WasmEdge/releases/download/{ver}/WasmEdge-plugin-{name}-{ver}-{key}.{ext}",
-            ver = resolved_version,
-            name = name,
-            key = key,
-            ext = ext,
-        );
-        if let Ok(resp) = http.head(&url).send().await {
+        let is_zip = matches!(specs.os.os_type, TargetOS::Windows);
+        let url = plugin_asset_url(name, &resolved_version.to_string(), &key, is_zip)
+            .expect("plugin asset URL");
+        if let Ok(resp) = http.head(url).send().await {
             if resp.status().is_success() {
                 chosen = Some(name.to_string());
                 break;

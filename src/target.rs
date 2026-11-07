@@ -36,6 +36,22 @@ impl Default for TargetOS {
 fn get_ubuntu_version() -> Option<(u32, u32)> {
     use std::fs;
 
+    let lsb_release = fs::read_to_string("/etc/lsb-release").ok()?;
+    parse_ubuntu_version(&lsb_release)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_ubuntu_version(lsb_release: &str) -> Option<(u32, u32)> {
+    if lsb_release
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .any(|(key, value)| {
+            key.eq_ignore_ascii_case("DISTRIB_ID") && value.trim_matches('"') != "Ubuntu"
+        })
+    {
+        return None;
+    }
+
     macro_rules! unwrap_or_continue {
         ($expr:expr, $variant:ident) => {
             match $expr {
@@ -45,21 +61,17 @@ fn get_ubuntu_version() -> Option<(u32, u32)> {
         };
     }
 
-    let Ok(lsb_release) = fs::read_to_string("/etc/lsb-release") else {
-        return None;
-    };
-
     for line in lsb_release.lines() {
         let (key, value) = unwrap_or_continue!(line.split_once('='), Some);
 
-        if key.eq_ignore_ascii_case("RELEASE") {
+        if key.eq_ignore_ascii_case("DISTRIB_RELEASE") {
             let (major, minor) = unwrap_or_continue!(value.split_once('.'), Some);
             let major = unwrap_or_continue!(major.parse(), Ok);
             let minor = unwrap_or_continue!(minor.parse(), Ok);
             return Some((major, minor));
         }
 
-        if key.eq_ignore_ascii_case("DESCRIPTION") && value.contains("Ubuntu 20.04") {
+        if key.eq_ignore_ascii_case("DISTRIB_DESCRIPTION") && value.contains("Ubuntu 20.04") {
             return Some((20, 4));
         }
     }
@@ -78,4 +90,35 @@ pub enum TargetArch {
     #[value(alias("arm64"))]
     #[cfg_attr(target_arch = "aarch64", default)]
     Aarch64,
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::parse_ubuntu_version;
+
+    #[test]
+    fn ubuntu_release_versions() {
+        for (release, expected) in [("20.04", (20, 4)), ("22.04", (22, 4)), ("24.04", (24, 4))] {
+            let contents = format!("DISTRIB_ID=Ubuntu\nDISTRIB_RELEASE={release}\nDISTRIB_DESCRIPTION=\"Ubuntu {release} LTS\"\n");
+            assert_eq!(parse_ubuntu_version(&contents), Some(expected));
+        }
+    }
+
+    #[test]
+    fn ubuntu_description_fallback() {
+        assert_eq!(
+            parse_ubuntu_version("DISTRIB_DESCRIPTION=\"Ubuntu 20.04 LTS\""),
+            Some((20, 4))
+        );
+    }
+
+    #[test]
+    fn non_ubuntu_release() {
+        assert_eq!(parse_ubuntu_version("DISTRIB_ID=Debian\nDISTRIB_RELEASE=12\nDISTRIB_DESCRIPTION=\"Debian GNU/Linux 12\""), None);
+        assert_eq!(
+            parse_ubuntu_version("DISTRIB_ID=LinuxMint\nDISTRIB_RELEASE=22.1"),
+            None
+        );
+        assert_eq!(parse_ubuntu_version(""), None);
+    }
 }

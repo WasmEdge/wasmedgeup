@@ -16,6 +16,7 @@ use crate::{
     fs as wfs, system,
 };
 
+use super::list::platform_fallbacks;
 use super::utils::find_plugin_shared_objects;
 use super::version::PluginVersion;
 
@@ -156,9 +157,6 @@ impl CommandExecutor for PluginInstallArgs {
             let os_key = plugin_platform_key(&specs.os, &pver_semver)?;
             tracing::debug!(%name, %pver, platform_key = %os_key, "Resolved plugin asset platform key");
 
-            let url = plugin_asset_url(name, &pver, &os_key, is_zip)?;
-            tracing::debug!(%name, %pver, %url, "Downloading plugin");
-
             let workspace =
                 wfs::create_temp_workspace(plugins_root.path(), &format!("{name}-{pver}"))?;
             let workspace_dir = workspace.path();
@@ -168,9 +166,31 @@ impl CommandExecutor for PluginInstallArgs {
                 workspace_dir.join("plugin.tar.gz")
             };
 
-            ctx.client
-                .download_to_path(url, &archive_path, ctx.no_progress, "plugin download")
-                .await?;
+            let platforms = platform_fallbacks(&os_key, &pver);
+            let mut selected_key = os_key.as_str();
+            for (index, platform) in platforms.iter().enumerate() {
+                let url = plugin_asset_url(name, &pver, platform, is_zip)?;
+                tracing::debug!(%name, %pver, %url, "Downloading plugin");
+                match ctx
+                    .client
+                    .download_to_path(url, &archive_path, ctx.no_progress, "plugin download")
+                    .await
+                {
+                    Ok(()) => {
+                        selected_key = platform;
+                        break;
+                    }
+                    Err(Error::Request { ref source, .. })
+                        if matches!(
+                            source.status(),
+                            Some(reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE)
+                        ) && index + 1 < platforms.len() =>
+                    {
+                        tracing::debug!(%platform, "Plugin asset missing; trying next platform");
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
 
             let mut file = std::fs::OpenOptions::new()
                 .read(true)
@@ -184,7 +204,7 @@ impl CommandExecutor for PluginInstallArgs {
             if self.no_verify {
                 tracing::warn!(plugin = %name, "Skipping plugin checksum verification due to --no-verify flag");
             } else {
-                let archive_name = plugin_archive_name(name, &pver, &os_key, is_zip);
+                let archive_name = plugin_archive_name(name, &pver, selected_key, is_zip);
                 let expected = ctx
                     .client
                     .get_archive_checksum(&pver, &archive_name)
