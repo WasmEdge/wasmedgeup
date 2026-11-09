@@ -65,7 +65,7 @@ pub fn detect_cpu() -> (CpuSpec, Vec<String>, Vec<String>) {
     #[cfg(windows)]
     {
         let notes = Vec::new();
-        let errors = Vec::new();
+        let mut errors = Vec::new();
         let arch = TargetArch::default();
 
         let cpuid = CpuId::new();
@@ -74,10 +74,15 @@ pub fn detect_cpu() -> (CpuSpec, Vec<String>, Vec<String>) {
             .get_processor_brand_string()
             .map(|s| s.as_str().trim().to_string());
 
-        let sys = System::new_with_specifics(
+        let cores_logical = match System::new_with_specifics(
             RefreshKind::nothing().with_cpu(CpuRefreshKind::everything()),
-        );
-        let cores_logical = Some(sys.cpus().len() as u32);
+        ) {
+            Ok(sys) => Some(sys.cpus().len() as u32),
+            Err(e) => {
+                errors.push(format!("cpu: sysinfo: {e}"));
+                None
+            }
+        };
         let cores_physical = None;
 
         let mut features: HashSet<CpuFeature> = HashSet::new();
