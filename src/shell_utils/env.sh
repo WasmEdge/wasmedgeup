@@ -16,11 +16,23 @@ esac
 case $(uname) in
     Linux)
         # Prepending library path for Linux
-        export LD_LIBRARY_PATH="{WASMEDGE_LIB_DIR}:${LD_LIBRARY_PATH}"
+        case ":${LD_LIBRARY_PATH}:" in
+            *:"{WASMEDGE_LIB_DIR}":*)
+                ;;
+            *)
+                export LD_LIBRARY_PATH="{WASMEDGE_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+                ;;
+        esac
         ;;
     Darwin)
         # Prepending library path for macOS
-        export DYLD_LIBRARY_PATH="{WASMEDGE_LIB_DIR}:${DYLD_LIBRARY_PATH}"
+        case ":${DYLD_LIBRARY_PATH}:" in
+            *:"{WASMEDGE_LIB_DIR}":*)
+                ;;
+            *)
+                export DYLD_LIBRARY_PATH="{WASMEDGE_LIB_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
+                ;;
+        esac
         ;;
 esac
 
