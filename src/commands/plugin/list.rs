@@ -1,4 +1,4 @@
-use crate::api::{plugin_asset_url, runtime_ge_015, PluginAssetInfo, WasmEdgeApiClient};
+use crate::api::{plugin_asset_url, PluginAssetInfo, WasmEdgeApiClient};
 use crate::cli::{CommandContext, CommandExecutor};
 use crate::prelude::*;
 use crate::system;
@@ -167,26 +167,36 @@ fn collect_plugin_candidates(
 /// Rows derived directly from GitHub asset metadata — no network
 /// speculation. An asset qualifies when its tag matches `runtime`, its
 /// platform appears in `platform_candidates`, and it passes the name filter.
+/// Each plugin and version yields at most one row, taken from the first
+/// platform in `platform_candidates` that publishes it.
 fn build_direct_rows(
     assets: &[PluginAssetInfo],
     runtime: &str,
     platform_candidates: &[String],
     name_filter: Option<&str>,
 ) -> Vec<Row> {
-    assets
-        .iter()
-        .filter(|a| a.version == runtime)
-        .filter(|a| platform_candidates.contains(&a.platform))
-        .filter(|a| match name_filter {
-            Some(filter) => a.plugin == filter,
-            None => true,
-        })
-        .map(|a| Row {
-            name: a.plugin.clone(),
-            version: a.version.clone(),
-            status: "available".to_string(),
-        })
-        .collect()
+    let mut seen: HashSet<(&str, &str)> = HashSet::new();
+    let mut rows: Vec<Row> = Vec::new();
+    for platform in platform_candidates {
+        for a in assets
+            .iter()
+            .filter(|a| a.version == runtime)
+            .filter(|a| &a.platform == platform)
+            .filter(|a| match name_filter {
+                Some(filter) => a.plugin == filter,
+                None => true,
+            })
+        {
+            if seen.insert((a.plugin.as_str(), a.version.as_str())) {
+                rows.push(Row {
+                    name: a.plugin.clone(),
+                    version: a.version.clone(),
+                    status: "available".to_string(),
+                });
+            }
+        }
+    }
+    rows
 }
 
 /// When `--all` is set and no direct rows exist, probe speculative URLs
@@ -291,19 +301,87 @@ fn order_plugins(a: &str, b: &str, cuda: bool, noavx: bool) -> Ordering {
     rank(a).cmp(&rank(b)).then(a.cmp(b))
 }
 
+/// Whether `runtime` publishes manylinux_2_28 Linux plugins. Uses the same
+/// `0.15.0-rc.0` boundary as [`plugin_platform_key`], so 0.15.0 release
+/// candidates count as 0.15. An unparseable runtime counts as 0.15 or newer.
+fn runtime_uses_manylinux_2_28(runtime: &str) -> bool {
+    match (
+        semver::Version::parse(runtime),
+        semver::Version::parse("0.15.0-rc.0"),
+    ) {
+        (Ok(version), Ok(boundary)) => version >= boundary,
+        _ => true,
+    }
+}
+
 pub fn platform_fallbacks(primary: &str, runtime: &str) -> Vec<String> {
-    let rt_ge_015 = runtime_ge_015(runtime);
+    let use_manylinux_2_28 = runtime_uses_manylinux_2_28(runtime);
     let mut out = vec![primary.to_string()];
     if primary.starts_with(UBUNTU20_PREFIX) {
-        if rt_ge_015 {
+        if use_manylinux_2_28 {
             out.push(primary.replacen(UBUNTU20_PREFIX, MANYLINUX_2_28_PREFIX, 1));
         } else {
             out.push(primary.replacen(UBUNTU20_PREFIX, MANYLINUX2014_PREFIX, 1));
         }
     } else if primary.starts_with(UBUNTU22_PREFIX) {
         out.push(primary.replacen(UBUNTU22_PREFIX, MANYLINUX_2_28_PREFIX, 1));
-    } else if primary.starts_with(MANYLINUX2014_PREFIX) && rt_ge_015 {
+    } else if primary.starts_with(MANYLINUX2014_PREFIX) && use_manylinux_2_28 {
         out.push(primary.replacen(MANYLINUX2014_PREFIX, MANYLINUX_2_28_PREFIX, 1));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn asset(plugin: &str, version: &str, platform: &str) -> PluginAssetInfo {
+        PluginAssetInfo {
+            plugin: plugin.to_string(),
+            version: version.to_string(),
+            platform: platform.to_string(),
+        }
+    }
+
+    #[test]
+    fn direct_rows_emit_one_row_per_plugin() {
+        let assets = vec![
+            asset("wasi_nn-ggml", "0.18.1", "manylinux_2_28_x86_64"),
+            asset("wasi_nn-ggml", "0.18.1", "ubuntu20_04_x86_64"),
+            asset("wasi_crypto", "0.18.1", "manylinux_2_28_x86_64"),
+            asset("wasi_nn-openvino", "0.18.1", "ubuntu20_04_x86_64"),
+            asset("wasi_nn-ggml", "0.18.1", "darwin_x86_64"),
+            asset("wasi_logging", "0.18.0", "manylinux_2_28_x86_64"),
+        ];
+        let platforms = platform_fallbacks("ubuntu20_04_x86_64", "0.18.1");
+
+        let names = |rows: Vec<Row>| -> Vec<String> { rows.into_iter().map(|r| r.name).collect() };
+        let rows = build_direct_rows(&assets, "0.18.1", &platforms, Some("wasi_nn-ggml"));
+        assert_eq!(names(rows), vec!["wasi_nn-ggml"]);
+
+        let rows = build_direct_rows(&assets, "0.18.1", &platforms, None);
+        assert!(rows.iter().all(|r| r.version == "0.18.1"));
+        assert!(rows.iter().all(|r| r.status == "available"));
+        assert_eq!(
+            names(rows),
+            vec!["wasi_nn-ggml", "wasi_nn-openvino", "wasi_crypto"]
+        );
+    }
+
+    #[test]
+    fn platform_fallbacks_count_release_candidates_as_015() {
+        for (runtime, fallback) in [
+            ("0.15.0-rc.0", "manylinux_2_28_aarch64"),
+            ("0.15.0-rc.1", "manylinux_2_28_aarch64"),
+            ("0.14.1", "manylinux2014_aarch64"),
+            ("0.15.0", "manylinux_2_28_aarch64"),
+            ("not-a-version", "manylinux_2_28_aarch64"),
+        ] {
+            assert_eq!(
+                platform_fallbacks("ubuntu20_04_aarch64", runtime),
+                vec!["ubuntu20_04_aarch64", fallback],
+                "runtime {runtime}"
+            );
+        }
+    }
 }

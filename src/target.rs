@@ -41,12 +41,26 @@ fn get_ubuntu_version() -> Option<(u32, u32)> {
 }
 
 #[cfg(target_os = "linux")]
+fn lsb_value(value: &str) -> &str {
+    let value = value.trim();
+    for quote in ['"', '\''] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    value
+}
+
+#[cfg(target_os = "linux")]
 fn parse_ubuntu_version(lsb_release: &str) -> Option<(u32, u32)> {
     if lsb_release
         .lines()
         .filter_map(|line| line.split_once('='))
         .any(|(key, value)| {
-            key.eq_ignore_ascii_case("DISTRIB_ID") && value.trim_matches('"') != "Ubuntu"
+            key.trim().eq_ignore_ascii_case("DISTRIB_ID") && lsb_value(value) != "Ubuntu"
         })
     {
         return None;
@@ -63,6 +77,7 @@ fn parse_ubuntu_version(lsb_release: &str) -> Option<(u32, u32)> {
 
     for line in lsb_release.lines() {
         let (key, value) = unwrap_or_continue!(line.split_once('='), Some);
+        let (key, value) = (key.trim(), lsb_value(value));
 
         if key.eq_ignore_ascii_case("DISTRIB_RELEASE") {
             let (major, minor) = unwrap_or_continue!(value.split_once('.'), Some);
@@ -120,5 +135,30 @@ mod tests {
             None
         );
         assert_eq!(parse_ubuntu_version(""), None);
+    }
+
+    #[test]
+    fn ubuntu_release_normalized_values() {
+        for contents in [
+            "DISTRIB_ID=Ubuntu\nDISTRIB_RELEASE=\"24.04\"\n",
+            "DISTRIB_ID='Ubuntu'\nDISTRIB_RELEASE=24.04\n",
+            "DISTRIB_ID=\"Ubuntu\"\nDISTRIB_RELEASE='24.04'\n",
+            "  DISTRIB_ID = Ubuntu  \n DISTRIB_RELEASE = 24.04 \n",
+            "DISTRIB_ID=Ubuntu\r\nDISTRIB_RELEASE=24.04\r\n",
+        ] {
+            assert_eq!(
+                parse_ubuntu_version(contents),
+                Some((24, 4)),
+                "{contents:?}"
+            );
+        }
+        assert_eq!(
+            parse_ubuntu_version(" DISTRIB_DESCRIPTION = 'Ubuntu 20.04.6 LTS' "),
+            Some((20, 4))
+        );
+        assert_eq!(
+            parse_ubuntu_version(" DISTRIB_ID = 'Debian' \nDISTRIB_RELEASE=12"),
+            None
+        );
     }
 }
