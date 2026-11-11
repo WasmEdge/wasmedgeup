@@ -3629,7 +3629,7 @@ dependencies = [
 
 [[package]]
 name = "wasmedgeup"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "cap-primitives",
  "cap-std",

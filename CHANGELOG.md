@@ -1,3 +1,9 @@
+## 0.2.6 (2026-11-09)
+
+### Fixes
+
+- build linux gnu binaries against glibc 2.28 (#370)
+
 ## 0.2.5 (2026-10-23)
 
 ### Fixes
