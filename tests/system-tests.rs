@@ -31,6 +31,7 @@ fn test_platform_key_prefix_is_reasonable() {
     let key = plugin_platform_key(&spec.os, &probe_version()).expect("platform key");
     let ok_prefix = key.starts_with("manylinux2014_")
         || key.starts_with("manylinux_2_28_")
+        || key.starts_with("ubuntu20_04_")
         || key.starts_with("darwin_")
         || key.starts_with("windows_");
     assert!(ok_prefix, "unexpected platform key prefix: {key}");
@@ -138,4 +139,36 @@ fn test_plugin_platform_key_darwin_major() {
     os.version = None;
     let key_fallback = plugin_platform_key(&os, &v).expect("darwin generic key");
     assert_eq!(key_fallback, "darwin_x86_64");
+}
+
+#[test]
+fn test_plugin_platform_key_ubuntu_arch_boundary() {
+    let mut os = OsSpec {
+        os_type: TargetOS::Ubuntu,
+        arch: TargetArch::X86_64,
+        distro: None,
+        version: None,
+        kernel: None,
+        libc: LibcSpec {
+            kind: LibcKind::Glibc,
+            version: None,
+        },
+    };
+    for version in ["0.13.4", "0.13.5", "0.18.1"] {
+        assert_eq!(
+            plugin_platform_key(&os, &Version::parse(version).unwrap()).unwrap(),
+            "ubuntu20_04_x86_64"
+        );
+    }
+    os.arch = TargetArch::Aarch64;
+    for (version, expected) in [
+        ("0.13.4", "manylinux2014_aarch64"),
+        ("0.13.5", "ubuntu20_04_aarch64"),
+        ("0.18.1", "ubuntu20_04_aarch64"),
+    ] {
+        assert_eq!(
+            plugin_platform_key(&os, &Version::parse(version).unwrap()).unwrap(),
+            expected
+        );
+    }
 }

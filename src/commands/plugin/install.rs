@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use cap_std::fs::Dir;
@@ -16,6 +17,7 @@ use crate::{
     fs as wfs, system,
 };
 
+use super::list::platform_fallbacks;
 use super::utils::find_plugin_shared_objects;
 use super::version::PluginVersion;
 
@@ -156,9 +158,6 @@ impl CommandExecutor for PluginInstallArgs {
             let os_key = plugin_platform_key(&specs.os, &pver_semver)?;
             tracing::debug!(%name, %pver, platform_key = %os_key, "Resolved plugin asset platform key");
 
-            let url = plugin_asset_url(name, &pver, &os_key, is_zip)?;
-            tracing::debug!(%name, %pver, %url, "Downloading plugin");
-
             let workspace =
                 wfs::create_temp_workspace(plugins_root.path(), &format!("{name}-{pver}"))?;
             let workspace_dir = workspace.path();
@@ -168,9 +167,20 @@ impl CommandExecutor for PluginInstallArgs {
                 workspace_dir.join("plugin.tar.gz")
             };
 
-            ctx.client
-                .download_to_path(url, &archive_path, ctx.no_progress, "plugin download")
-                .await?;
+            let platforms = platform_fallbacks(&os_key, &pver);
+            let selected_key = download_first_available(&platforms, is_missing_asset, |platform| {
+                let (client, pver, archive_path) = (&ctx.client, &pver, &archive_path);
+                let no_progress = ctx.no_progress;
+                async move {
+                    let url = plugin_asset_url(name, pver, platform, is_zip)?;
+                    tracing::debug!(%name, %pver, %url, "Downloading plugin");
+                    client
+                        .download_to_path(url, archive_path, no_progress, "plugin download")
+                        .await
+                }
+            })
+            .await?
+            .unwrap_or(os_key.as_str());
 
             let mut file = std::fs::OpenOptions::new()
                 .read(true)
@@ -184,7 +194,7 @@ impl CommandExecutor for PluginInstallArgs {
             if self.no_verify {
                 tracing::warn!(plugin = %name, "Skipping plugin checksum verification due to --no-verify flag");
             } else {
-                let archive_name = plugin_archive_name(name, &pver, &os_key, is_zip);
+                let archive_name = plugin_archive_name(name, &pver, selected_key, is_zip);
                 let expected = ctx
                     .client
                     .get_archive_checksum(&pver, &archive_name)
@@ -252,6 +262,41 @@ pub(super) fn select_runtime_version(
     requested: Option<&str>,
 ) -> Result<(semver::Version, Dir)> {
     select_usable_managed_runtime(versions_root, requested, "<none installed>")
+}
+
+/// Download from each platform in `platforms` in order and return the one that
+/// succeeded. A missing asset moves on to the next platform; any other error,
+/// or a missing asset on the last platform, is returned. Returns `None` only
+/// when `platforms` is empty.
+async fn download_first_available<'a, E, Fut>(
+    platforms: &'a [String],
+    is_missing: impl Fn(&E) -> bool,
+    mut download: impl FnMut(&'a str) -> Fut,
+) -> Result<Option<&'a str>, E>
+where
+    Fut: Future<Output = Result<(), E>>,
+{
+    for (index, platform) in platforms.iter().map(String::as_str).enumerate() {
+        match download(platform).await {
+            Ok(()) => return Ok(Some(platform)),
+            Err(error) if is_missing(&error) && index + 1 < platforms.len() => {
+                tracing::debug!(%platform, "Plugin asset missing; trying next platform");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+fn is_missing_asset(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Request { source, .. }
+            if matches!(
+                source.status(),
+                Some(reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE)
+            )
+    )
 }
 
 /// Copy each discovered plugin shared object in `paths` into `dest_plugin`,
@@ -358,5 +403,87 @@ mod tests {
         let copied = copy_plugin_shared_objects(&[good, missing], &dest_root, dest.path()).await;
 
         assert_eq!(copied, 1);
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum FakeError {
+        Missing(String),
+        Other(String),
+    }
+
+    fn fake_missing(error: &FakeError) -> bool {
+        matches!(error, FakeError::Missing(_))
+    }
+
+    async fn run_download(
+        platforms: &[String],
+        outcome: impl Fn(&str) -> Result<(), FakeError>,
+    ) -> (Result<Option<&str>, FakeError>, Vec<String>) {
+        let mut calls = Vec::new();
+        let selected = download_first_available(platforms, fake_missing, |platform| {
+            calls.push(platform.to_string());
+            std::future::ready(outcome(platform))
+        })
+        .await;
+        (selected, calls)
+    }
+
+    #[tokio::test]
+    async fn download_falls_back_when_first_platform_is_missing() {
+        let platforms = platform_fallbacks("ubuntu20_04_aarch64", "0.18.1");
+        let (selected, calls) = run_download(&platforms, |platform| {
+            if platform.starts_with("ubuntu") {
+                Err(FakeError::Missing(platform.to_string()))
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+
+        assert_eq!(calls, ["ubuntu20_04_aarch64", "manylinux_2_28_aarch64"]);
+        assert_eq!(selected, Ok(Some("manylinux_2_28_aarch64")));
+        assert_eq!(
+            plugin_archive_name("wasi_crypto", "0.18.1", selected.unwrap().unwrap(), false),
+            "WasmEdge-plugin-wasi_crypto-0.18.1-manylinux_2_28_aarch64.tar.gz"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_stops_at_first_available_platform() {
+        let platforms = platform_fallbacks("ubuntu20_04_aarch64", "0.18.1");
+        let (selected, calls) = run_download(&platforms, |_| Ok(())).await;
+
+        assert_eq!(calls, ["ubuntu20_04_aarch64"]);
+        assert_eq!(selected, Ok(Some("ubuntu20_04_aarch64")));
+    }
+
+    #[tokio::test]
+    async fn download_returns_last_missing_error_when_all_are_missing() {
+        let platforms = platform_fallbacks("ubuntu20_04_aarch64", "0.18.1");
+        let (selected, calls) = run_download(&platforms, |platform| {
+            Err(FakeError::Missing(platform.to_string()))
+        })
+        .await;
+
+        assert_eq!(calls, ["ubuntu20_04_aarch64", "manylinux_2_28_aarch64"]);
+        assert_eq!(
+            selected,
+            Err(FakeError::Missing("manylinux_2_28_aarch64".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn download_returns_other_errors_without_trying_fallbacks() {
+        let platforms = platform_fallbacks("ubuntu20_04_aarch64", "0.18.1");
+        let (selected, calls) = run_download(&platforms, |platform| {
+            Err(FakeError::Other(platform.to_string()))
+        })
+        .await;
+
+        assert_eq!(calls, ["ubuntu20_04_aarch64"]);
+        assert_eq!(
+            selected,
+            Err(FakeError::Other("ubuntu20_04_aarch64".to_string()))
+        );
     }
 }

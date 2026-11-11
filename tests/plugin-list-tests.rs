@@ -98,3 +98,22 @@ async fn test_github_assets_list_contains_expected_platform() {
         "Either matched a platform asset, or release has no plugin assets at all"
     );
 }
+
+#[test]
+fn test_platform_fallbacks_preserve_primary_order() {
+    for (primary, runtime, fallback) in [
+        ("ubuntu20_04_x86_64", "0.14.2", "manylinux2014_x86_64"),
+        ("ubuntu20_04_x86_64", "0.18.1", "manylinux_2_28_x86_64"),
+        ("ubuntu20_04_aarch64", "0.18.1", "manylinux_2_28_aarch64"),
+        ("ubuntu22_04_x86_64", "0.18.1", "manylinux_2_28_x86_64"),
+    ] {
+        assert_eq!(
+            platform_fallbacks(primary, runtime),
+            vec![primary, fallback]
+        );
+    }
+    assert_eq!(
+        platform_fallbacks("manylinux_2_28_x86_64", "0.18.1"),
+        vec!["manylinux_2_28_x86_64"]
+    );
+}
