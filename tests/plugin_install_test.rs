@@ -5,7 +5,9 @@ use wasmedgeup::{
     api::{plugin_asset_url, WasmEdgeApiClient},
     cli::{CommandContext, CommandExecutor},
     commands::install::InstallArgs,
-    commands::plugin::{install::PluginInstallArgs, version::PluginVersion},
+    commands::plugin::{
+        install::PluginInstallArgs, list::platform_fallbacks, version::PluginVersion,
+    },
     system,
 };
 
@@ -93,23 +95,27 @@ async fn run_plugin_install_smoke(no_verify: bool) {
     let key =
         plugin_platform_key(&specs.os, &resolved_version).expect("compute plugin platform key");
     let candidates = ["wasi_crypto", "wasi_nn", "wasi_logging"];
+    let platforms = platform_fallbacks(&key, &resolved_version.to_string());
     let http = reqwest::Client::new();
     let mut chosen: Option<String> = None;
-    for name in candidates {
+    'probe: for name in candidates {
         let is_zip = matches!(specs.os.os_type, TargetOS::Windows);
-        let url = plugin_asset_url(name, &resolved_version.to_string(), &key, is_zip)
-            .expect("plugin asset URL");
-        if let Ok(resp) = http.head(url).send().await {
-            if resp.status().is_success() {
-                chosen = Some(name.to_string());
-                break;
+        for platform in &platforms {
+            let url = plugin_asset_url(name, &resolved_version.to_string(), platform, is_zip)
+                .expect("plugin asset URL");
+            if let Ok(resp) = http.head(url).send().await {
+                if resp.status().is_success() {
+                    chosen = Some(name.to_string());
+                    break 'probe;
+                }
             }
         }
     }
     let Some(plugin_name) = chosen else {
         eprintln!(
-            "No plugin asset available for version {} and key {}; skipping",
-            resolved_version, key
+            "No plugin asset available for version {} and platforms {}; skipping",
+            resolved_version,
+            platforms.join(", ")
         );
         return;
     };
