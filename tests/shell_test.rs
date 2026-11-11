@@ -116,6 +116,49 @@ fn test_library_path_append() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_posix_library_path_is_idempotent() {
+    let (_test_home, _home_path) = setup_test_environment();
+    let install_dir = TempDir::new().unwrap();
+    shell_utils::setup_path(install_dir.path()).unwrap();
+    let lib_path = install_dir.path().join(LIB_DIR).display().to_string();
+
+    for (platform, variable) in [
+        ("Linux", "LD_LIBRARY_PATH"),
+        ("Darwin", "DYLD_LIBRARY_PATH"),
+    ] {
+        for initial in [None, Some(""), Some("/opt/x")] {
+            let expected = match initial {
+                Some("/opt/x") => format!("{lib_path}:/opt/x"),
+                _ => lib_path.clone(),
+            };
+            for sources in [1, 2] {
+                let script = format!(
+                    "uname() {{ echo {platform}; }}; {}printf '%s' \"${variable}\"",
+                    ". \"$1\" || exit; ".repeat(sources)
+                );
+                let mut command = std::process::Command::new("sh");
+                command
+                    .args(["-c", &script, "sh"])
+                    .arg(install_dir.path().join("env"));
+                match initial {
+                    Some(value) => command.env(variable, value),
+                    None => command.env_remove(variable),
+                };
+                let output = command.output().unwrap();
+                assert!(output.status.success(), "{output:?}");
+                assert_eq!(
+                    String::from_utf8(output.stdout).unwrap(),
+                    expected,
+                    "{platform}, initial={initial:?}, sources={sources}"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod setup_uninstall {
     use super::setup_test_environment;
