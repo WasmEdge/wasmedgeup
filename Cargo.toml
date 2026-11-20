@@ -44,7 +44,7 @@ tar = "0.4.46"
 zip = { version = "9.1.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 winreg = "0.56"
 nvml-wrapper = "0.13.0"
-wmi = "0.18.4"
+wmi = { version = "0.18.4", default-features = false }
 windows-sys = { version = "0.61.2", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 
