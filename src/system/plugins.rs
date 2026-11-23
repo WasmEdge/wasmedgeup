@@ -1,3 +1,4 @@
+use crate::api::is_arm_ubuntu_supported;
 use crate::error::{Error, Result};
 use crate::system::spec::{LibcKind, OsSpec};
 use crate::target::{TargetArch, TargetOS};
@@ -24,6 +25,7 @@ fn arch_to_darwin_string(arch: &TargetArch) -> &'static str {
 /// Rules:
 /// - macOS: darwin_<darwin-major>-<arch> when available (fallback: darwin_<arch>)
 /// - Windows: windows_x86_64 on x86_64
+/// - Ubuntu (glibc): ubuntu20_04_<arch> when supported
 /// - Linux (glibc):
 ///   - <= 0.14.x: manylinux2014_<arch>
 ///   - >= 0.15.x: manylinux_2_28_<arch>
@@ -51,6 +53,12 @@ pub fn plugin_platform_key(os: &OsSpec, runtime_version: &Version) -> Result<Str
         },
         TargetOS::Linux | TargetOS::Ubuntu => {
             if matches!(os.libc.kind, LibcKind::Glibc) {
+                if matches!(os.os_type, TargetOS::Ubuntu)
+                    && (matches!(os.arch, TargetArch::X86_64)
+                        || is_arm_ubuntu_supported(runtime_version))
+                {
+                    return Ok(format!("ubuntu20_04_{arch_str}"));
+                }
                 let rc_boundary =
                     Version::parse("0.15.0-rc.0").map_err(|source| Error::SemVer { source })?;
                 let use_ml2014 = runtime_version < &rc_boundary;

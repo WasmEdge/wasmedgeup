@@ -606,7 +606,7 @@ fn is_manylinux2014_supported(version: &Version) -> bool {
     req.matches(version)
 }
 
-fn is_arm_ubuntu_supported(version: &Version) -> bool {
+pub(crate) fn is_arm_ubuntu_supported(version: &Version) -> bool {
     // ARM-based Ubuntu 20.04 is supported after 0.13.5
     version >= &Version::new(0, 13, 5)
 }
@@ -724,7 +724,8 @@ fn parse_plugin_asset_name(name: &str, tag: &str) -> Option<(String, String, Str
         .strip_suffix(PLUGIN_TAR_GZ)
         .or_else(|| plat_with_ext.strip_suffix(PLUGIN_ZIP))
         .unwrap_or(plat_with_ext);
-    Some((plugin.to_string(), tag.to_string(), platform.to_string()))
+    let platform = platform.replacen("ubuntu20.04_", "ubuntu20_04_", 1);
+    Some((plugin.to_string(), tag.to_string(), platform))
 }
 
 /// Build the canonical archive filename for a plugin, e.g.
@@ -736,6 +737,7 @@ fn parse_plugin_asset_name(name: &str, tag: &str) -> Option<(String, String, Str
 /// [`WasmEdgeApiClient::get_archive_checksum`].
 pub fn plugin_archive_name(plugin: &str, runtime: &str, platform: &str, is_zip: bool) -> String {
     let ext = if is_zip { "zip" } else { "tar.gz" };
+    let platform = platform.replacen("ubuntu20_04_", "ubuntu20.04_", 1);
     format!("{PLUGIN_ASSET_PREFIX}{plugin}-{runtime}-{platform}.{ext}")
 }
 
@@ -985,6 +987,24 @@ mod tests {
         assert!(runtime_ge_015("1.0.0"));
         // Unparseable input fails open (defensive).
         assert!(runtime_ge_015("not-a-version"));
+    }
+
+    #[test]
+    fn ubuntu_plugin_asset_names_match_release_and_checksum() {
+        for arch in ["x86_64", "aarch64"] {
+            let platform = format!("ubuntu20_04_{arch}");
+            let expected = format!("WasmEdge-plugin-wasi_nn-ggml-0.18.1-ubuntu20.04_{arch}.tar.gz");
+            assert_eq!(
+                plugin_archive_name("wasi_nn-ggml", "0.18.1", &platform, false),
+                expected
+            );
+            assert!(plugin_asset_url("wasi_nn-ggml", "0.18.1", &platform, false)
+                .unwrap()
+                .path()
+                .ends_with(&expected));
+            let parsed = parse_plugin_asset_name(&expected, "0.18.1").unwrap();
+            assert_eq!(parsed.2, platform);
+        }
     }
 
     #[test]
