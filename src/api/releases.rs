@@ -10,7 +10,7 @@ use gix::{
                 ExtendedBufRead, HandleProgress, ReadlineBufRead, RequestWriter,
                 SetServiceResponse, Transport,
             },
-            Account, Error as TransportError, MessageKind, TransportWithoutIO, WriteMode,
+            Credentials, Error as TransportError, MessageKind, TransportWithoutIO, WriteMode,
         },
         packetline::PacketLineRef,
         Protocol, Service,
@@ -219,8 +219,11 @@ impl<T> BoundedTransport<T> {
 }
 
 impl<T: TransportWithoutIO> TransportWithoutIO for BoundedTransport<T> {
-    fn set_identity(&mut self, identity: Account) -> std::result::Result<(), TransportError> {
-        self.inner.set_identity(identity)
+    fn set_credentials(
+        &mut self,
+        credentials: Credentials,
+    ) -> std::result::Result<(), TransportError> {
+        self.inner.set_credentials(credentials)
     }
 
     fn to_url(&self) -> Cow<'_, BStr> {
@@ -581,6 +584,21 @@ mod tests {
             .expect("POST response")
             .body;
         assert!(post_body.read_to_end(&mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn bounded_transport_forwards_credentials() {
+        let url = gix::url::parse("https://example.test/repo.git").expect("valid URL");
+        let http = http::connect_http(StaticHttp { body: Vec::new() }, url, Protocol::V2, false);
+        let mut transport = BoundedTransport::new(http, MAX_GIT_RESPONSE_BYTES);
+
+        transport
+            .set_credentials(Credentials::UsernamePassword {
+                username: "user".to_string(),
+                password: "password".to_string(),
+                oauth_refresh_token: None,
+            })
+            .expect("the wrapped HTTP transport accepts credentials");
     }
 
     #[test]
