@@ -83,16 +83,26 @@ impl WasmEdgeApiClient {
         )
     }
 
-    /// Fetch the first `num_releases` WasmEdge versions from the upstream git
-    /// remote. The underlying gix transport is blocking, so we run it on
-    /// `spawn_blocking` to keep the tokio worker free.
+    /// Fetch the first `num_releases` published WasmEdge versions from the upstream git
+    /// remote.
     pub async fn releases(
         &self,
         filter: ReleasesFilter,
         num_releases: usize,
     ) -> Result<Vec<Version>> {
-        let releases = fetch_releases_blocking(filter).await?;
-        Ok(releases.into_iter().take(num_releases).collect())
+        let candidates = fetch_releases_blocking(filter).await?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let client = self.http_client()?;
+        let candidates = candidates
+            .into_iter()
+            .map(|version| {
+                let url = Self::checksum_url(&version.to_string());
+                (version, url)
+            })
+            .collect();
+        Self::filter_published(&client, candidates, num_releases).await
     }
 
     pub(crate) async fn releases_with_latest(
@@ -101,12 +111,18 @@ impl WasmEdgeApiClient {
         num_releases: usize,
     ) -> Result<(Vec<Version>, Version)> {
         let candidates = fetch_releases_blocking(ReleasesFilter::All).await?;
-        let (releases, stable_candidates) =
-            select_release_listing(candidates, filter, num_releases);
-        let latest = self
-            .latest_release_from_candidates(stable_candidates)
-            .await?;
-        Ok((releases, latest))
+        if candidates.is_empty() {
+            return Err(Error::NoReleasesFound);
+        }
+        let client = self.http_client()?;
+        let candidates = candidates
+            .into_iter()
+            .map(|version| {
+                let url = Self::checksum_url(&version.to_string());
+                (version, url)
+            })
+            .collect();
+        Self::published_releases_with_latest(&client, candidates, filter, num_releases).await
     }
 
     /// Return the newest stable version whose release assets are uploaded.
@@ -144,6 +160,92 @@ impl WasmEdgeApiClient {
             tracing::debug!(%version, "stable tag has no published assets yet — skipping");
         }
         Err(Error::NoPublishedReleasesFound)
+    }
+
+    /// Filter candidate releases, returning up to `num_releases` published versions
+    /// matching `filter` together with the newest published stable release.
+    ///
+    /// Candidates are probed newest-first via their SHA256SUM file on the release CDN.
+    /// Tags that return 404/410 (draft or unpublished releases) are skipped.
+    pub(crate) async fn published_releases_with_latest(
+        client: &Client,
+        candidates: Vec<(Version, Url)>,
+        filter: ReleasesFilter,
+        num_releases: usize,
+    ) -> Result<(Vec<Version>, Version)> {
+        if candidates.is_empty() {
+            return Err(Error::NoReleasesFound);
+        }
+
+        let mut releases = Vec::with_capacity(num_releases);
+        let mut latest_stable = None;
+        let mut consecutive_unpublished = 0;
+
+        for (version, url) in candidates {
+            let matches_filter = filter.matches(&version);
+            let is_stable = ReleasesFilter::Stable.matches(&version);
+
+            let need_filter_release = matches_filter && releases.len() < num_releases;
+            let need_latest = is_stable && latest_stable.is_none();
+
+            if !need_filter_release && !need_latest {
+                if releases.len() >= num_releases && latest_stable.is_some() {
+                    break;
+                }
+                continue;
+            }
+
+            if Self::is_release_published(client, url).await? {
+                consecutive_unpublished = 0;
+                if need_filter_release {
+                    releases.push(version.clone());
+                }
+                if need_latest {
+                    latest_stable = Some(version);
+                }
+            } else {
+                tracing::debug!(%version, "release tag has no published assets yet — skipping");
+                consecutive_unpublished += 1;
+                if consecutive_unpublished >= MAX_RELEASE_PUBLICATION_PROBES {
+                    break;
+                }
+            }
+
+            if releases.len() >= num_releases && latest_stable.is_some() {
+                break;
+            }
+        }
+
+        let latest = latest_stable.ok_or(Error::NoPublishedReleasesFound)?;
+        Ok((releases, latest))
+    }
+
+    /// Filter candidate releases, returning up to `num_releases` published versions.
+    pub(crate) async fn filter_published(
+        client: &Client,
+        candidates: Vec<(Version, Url)>,
+        num_releases: usize,
+    ) -> Result<Vec<Version>> {
+        let mut releases = Vec::with_capacity(num_releases);
+        let mut consecutive_unpublished = 0;
+
+        for (version, url) in candidates {
+            if releases.len() >= num_releases {
+                break;
+            }
+            if Self::is_release_published(client, url).await? {
+                consecutive_unpublished = 0;
+                releases.push(version);
+            } else {
+                tracing::debug!(%version, "release tag has no published assets yet — skipping");
+                consecutive_unpublished += 1;
+                if consecutive_unpublished >= MAX_RELEASE_PUBLICATION_PROBES {
+                    break;
+                }
+            }
+        }
+
+        Ok(releases)
     }
 
     /// Return `true` if the file at `url` is downloadable.
@@ -662,24 +764,6 @@ fn is_missing_status(status: reqwest::StatusCode) -> bool {
     )
 }
 
-fn select_release_listing(
-    candidates: Vec<Version>,
-    filter: ReleasesFilter,
-    num_releases: usize,
-) -> (Vec<Version>, Vec<Version>) {
-    let releases = candidates
-        .iter()
-        .filter(|version| filter.matches(version))
-        .take(num_releases)
-        .cloned()
-        .collect();
-    let stable_candidates = candidates
-        .into_iter()
-        .filter(|version| ReleasesFilter::Stable.matches(version))
-        .collect();
-    (releases, stable_candidates)
-}
-
 /// Run the synchronous gix-based release enumeration on a blocking worker.
 ///
 /// `releases::get_all` performs blocking network I/O. Running it on the tokio
@@ -769,16 +853,6 @@ mod tests {
 
     fn v(s: &str) -> Version {
         Version::parse(s).expect("valid semver")
-    }
-
-    #[test]
-    fn selects_displayed_releases_and_stable_candidates_from_one_result() {
-        let candidates = vec![v("1.2.0-rc.1"), v("1.1.0"), v("1.0.0"), v("0.9.0-beta.1")];
-
-        let (displayed, stable) = select_release_listing(candidates, ReleasesFilter::All, 2);
-
-        assert_eq!(displayed, vec![v("1.2.0-rc.1"), v("1.1.0")]);
-        assert_eq!(stable, vec![v("1.1.0"), v("1.0.0")]);
     }
 
     fn cached_http_client_timeouts() -> Option<(u64, u64)> {
@@ -1394,5 +1468,117 @@ mod tests {
             .expect_err("a probe error must not select an older tag");
         assert!(matches!(err, Error::Request { .. }), "{err:?}");
         assert_eq!(server.paths(), ["/405/500/SHA256SUM", "/405/500/SHA256SUM"]);
+    }
+
+    #[tokio::test]
+    async fn published_releases_with_latest_skips_unpublished_draft_tags() {
+        let server = StubServer::start();
+        let candidates = vec![
+            (v("0.19.0"), server.url("/404/200/SHA256SUM")),
+            (v("0.18.1"), server.url("/200/200/SHA256SUM")),
+            (v("0.18.0"), server.url("/200/200/SHA256SUM")),
+            (v("0.17.2"), server.url("/200/200/SHA256SUM")),
+        ];
+
+        let (releases, latest) = WasmEdgeApiClient::published_releases_with_latest(
+            &Client::new(),
+            candidates,
+            ReleasesFilter::Stable,
+            2,
+        )
+        .await
+        .expect("probe succeeds");
+
+        assert_eq!(releases, vec![v("0.18.1"), v("0.18.0")]);
+        assert_eq!(latest, v("0.18.1"));
+        assert_eq!(
+            server.paths(),
+            [
+                "/404/200/SHA256SUM",
+                "/200/200/SHA256SUM",
+                "/200/200/SHA256SUM"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn published_releases_with_latest_handles_prereleases_and_filters_drafts() {
+        let server = StubServer::start();
+        let candidates = vec![
+            (v("0.19.0-rc.1"), server.url("/404/200/SHA256SUM")),
+            (v("0.18.2-rc.1"), server.url("/200/200/SHA256SUM")),
+            (v("0.18.1"), server.url("/200/200/SHA256SUM")),
+            (v("0.18.0"), server.url("/200/200/SHA256SUM")),
+        ];
+
+        let (releases, latest) = WasmEdgeApiClient::published_releases_with_latest(
+            &Client::new(),
+            candidates,
+            ReleasesFilter::All,
+            2,
+        )
+        .await
+        .expect("probe succeeds");
+
+        assert_eq!(releases, vec![v("0.18.2-rc.1"), v("0.18.1")]);
+        assert_eq!(latest, v("0.18.1"));
+    }
+
+    #[tokio::test]
+    async fn published_releases_with_latest_stops_at_probe_errors() {
+        let server = StubServer::start();
+        let candidates = vec![
+            (v("0.19.0"), server.url("/405/500/SHA256SUM")),
+            (v("0.18.1"), server.url("/200/200/SHA256SUM")),
+        ];
+
+        let err = WasmEdgeApiClient::published_releases_with_latest(
+            &Client::new(),
+            candidates,
+            ReleasesFilter::Stable,
+            2,
+        )
+        .await
+        .expect_err("probe error must propagate");
+
+        assert!(matches!(err, Error::Request { .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn published_releases_with_latest_caps_consecutive_unpublished_probes() {
+        let server = StubServer::start();
+        let candidates = (0..12)
+            .rev()
+            .map(|patch| (Version::new(1, 0, patch), server.url("/404/200/SHA256SUM")))
+            .collect();
+
+        let err = WasmEdgeApiClient::published_releases_with_latest(
+            &Client::new(),
+            candidates,
+            ReleasesFilter::Stable,
+            5,
+        )
+        .await
+        .expect_err("no candidate is published");
+
+        assert!(matches!(err, Error::NoPublishedReleasesFound), "{err:?}");
+        assert_eq!(server.paths().len(), 10);
+    }
+
+    #[tokio::test]
+    async fn filter_published_skips_unpublished_tags() {
+        let server = StubServer::start();
+        let candidates = vec![
+            (v("0.19.0"), server.url("/404/200/SHA256SUM")),
+            (v("0.18.1"), server.url("/200/200/SHA256SUM")),
+            (v("0.18.0"), server.url("/404/200/SHA256SUM")),
+            (v("0.17.2"), server.url("/200/200/SHA256SUM")),
+        ];
+
+        let releases = WasmEdgeApiClient::filter_published(&Client::new(), candidates, 2)
+            .await
+            .expect("probe succeeds");
+
+        assert_eq!(releases, vec![v("0.18.1"), v("0.17.2")]);
     }
 }
